@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TripMate Guardrail & HITL</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.2.6/purify.min.js"></script>
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <div class="brand"><span class="brand-mark">✈</span><span>TripMate Guardrail + HITL</span></div>
+      <button id="newChatBtn" class="btn btn-ghost" type="button">+ Cuộc trò chuyện mới</button>
+    </header>
+    <main id="chatLog" class="chat-log">
+      <div class="empty-state" id="emptyState">
+        <h1>Lập kế hoạch chuyến đi an toàn</h1>
+        <p>Supervisor sẽ phân loại yêu cầu, các agent sẽ tìm dữ liệu, sau đó bạn duyệt lịch trình trước khi nhận bản cuối.</p>
+        <div class="examples">
+          <button class="example-chip" type="button">Plan a 2 day trip from Hanoi to Tokyo with flights, hotels and weather</button>
+          <button class="example-chip" type="button">Create a budget trip from Ho Chi Minh City to Singapore</button>
+        </div>
+      </div>
+    </main>
+    <footer class="composer">
+      <form id="chatForm" class="composer-form">
+        <textarea id="messageInput" class="composer-input" placeholder="Nhập yêu cầu chuyến đi..." rows="1" required></textarea>
+        <button id="sendBtn" class="btn btn-primary" type="submit">Gửi</button>
+      </form>
+      <p class="composer-hint">Enter để gửi · Shift+Enter để xuống dòng</p>
+    </footer>
+  </div>
+
+  <template id="userBubbleTpl"><div class="msg msg-user"><div class="bubble bubble-user"></div></div></template>
+  <template id="aiBubbleTpl">
+    <div class="msg msg-ai"><div class="bubble bubble-ai">
+      <div class="answer-content"></div>
+      <div class="approval-box" hidden>
+        <p class="approval-request"></p>
+        <button type="button" class="btn btn-primary approve-btn">Duyệt lịch trình</button>
+        <button type="button" class="btn btn-ghost revise-btn">Yêu cầu chỉnh sửa</button>
+      </div>
+      <div class="details">
+        <div class="details-tabs">
+          <button type="button" class="tab-btn active" data-tab="flight">Chuyến bay</button>
+          <button type="button" class="tab-btn" data-tab="hotel">Khách sạn</button>
+          <button type="button" class="tab-btn" data-tab="weather">Thời tiết</button>
+          <button type="button" class="tab-btn" data-tab="budget">Ngân sách</button>
+          <button type="button" class="tab-btn" data-tab="itinerary">Lịch trình</button>
+        </div>
+        <div class="details-panel" data-panel="flight"></div>
+        <div class="details-panel" data-panel="hotel" hidden></div>
+        <div class="details-panel" data-panel="weather" hidden></div>
+        <div class="details-panel" data-panel="budget" hidden></div>
+        <div class="details-panel" data-panel="itinerary" hidden></div>
+      </div>
+      <div class="msg-meta"><span class="llm-calls"></span></div>
+    </div></div>
+  </template>
+  <template id="loadingBubbleTpl"><div class="msg msg-loading"><div class="bubble bubble-ai"><span class="loading-label">Đang chạy guardrail, tìm dữ liệu và tạo lịch trình...</span></div></div></template>
+  <template id="errorBubbleTpl"><div class="msg msg-error"><div class="bubble bubble-error"></div></div></template>
+  <script src="/static/script.js"></script>
+</body>
+</html>

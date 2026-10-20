@@ -21,7 +21,7 @@ BASE_DIR = Path(__file__).resolve().parent
 app = FastAPI(
     title="AI Travel Planning Agent System",
     description="LangGraph travel planner with guardrail and human approval",
-    version="2.1.0",
+    version="2.2.0",
 )
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))

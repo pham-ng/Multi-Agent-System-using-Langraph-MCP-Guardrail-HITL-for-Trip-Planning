@@ -160,6 +160,8 @@ approval_request      câu hỏi hiển thị cho human reviewer
 approved              quyết định của reviewer
 human_feedback        feedback khi cần revision
 final_response        câu trả lời sau approval/revision
+grounding_status      pending, verified hoặc blocked
+grounding_issues      lý do chặn khi câu trả lời thiếu bằng chứng
 llm_calls             bộ đếm số lần gọi LLM
 ```
 
@@ -194,7 +196,7 @@ Evidence từ MCP/API có thể rất dài. `_clip(value, max_chars)` giới h�
 
 Khi thêm agent mới, nên xác định rõ limit cho từng field thay vì nối toàn bộ state vào prompt.
 
-### 5. Nguyên tắc chống bịa dữ liệu
+### 5. Grounded generation và cơ chế fail-closed
 
 Prompt của budget, itinerary và final agent đều yêu cầu:
 
@@ -204,7 +206,16 @@ Prompt của budget, itinerary và final agent đều yêu cầu:
 - phân biệt live data với recommendation;
 - nhắc người dùng xác minh availability, giá cuối và chính sách hủy.
 
-Đây là guardrail ở tầng prompt, không phải bằng chứng tuyệt đối. Guardrail và supervisor hiện đã dùng Pydantic schema để validate JSON; nếu output không hợp lệ, hệ thống fallback an toàn.
+Đây không phải lời hứa “LLM không bao giờ sai” — không có hệ thống sinh ngôn ngữ nào bảo đảm tuyệt đối điều đó. Thay vào đó, workflow dùng nhiều lớp và **fail closed**:
+
+1. `FinalPlanDecision` bắt buộc output cuối phải là JSON có `answer`, `verified_facts`, `estimates`, `unknowns`.
+2. Evidence từ API/MCP được đóng gói thành data, không được coi là instruction.
+3. Calendar và weekday được tính bằng Python; nếu người dùng chưa nhập ngày, câu trả lời không được tự thêm ngày/thứ.
+4. Một `GroundingReport` verifier đối chiếu candidate với context packet và đánh dấu lỗi.
+5. Schema lỗi, verifier lỗi hoặc verifier không approve thì workflow **không trả lịch trình**; UI hiển thị “đã chặn vì thiếu bằng chứng”.
+6. Dữ kiện thiếu được đưa vào `Not verified yet`, còn đề xuất/chi phí chưa xác minh được đưa vào `Estimates & recommendations`.
+
+Vì vậy, hệ thống có thể trả lời ít hơn hoặc dừng lại khi provider/API không có dữ liệu. Đây là hành vi an toàn có chủ ý, đặc biệt với giá vé, lịch bay, tình trạng phòng và thời tiết.
 
 ### 6. Context khi resume HITL
 
@@ -327,6 +338,7 @@ Nguyên tắc quan trọng:
 - Control state (`approved`, `guardrail_allowed`, `thread_id`) tách khỏi evidence.
 - MCP/provider output được coi là **data không đáng tin**, không phải instruction cho model.
 - Calendar arithmetic không giao cho LLM: code Python tính weekday từ ngày cụ thể; nếu người dùng chưa cho ngày, prompt bắt buộc dùng `Day 1`, `Day 2` và không được tự bịa thứ/ngày.
+- Final answer đi qua schema validation + grounding verifier; nếu không chứng minh được claim thì fail closed, không “điền cho đủ”.
 - Resume chỉ gửi `thread_id`, `approved`, `feedback`; server lấy evidence cũ từ checkpoint.
 - Không đưa API key, `DATABASE_URL` hoặc secret vào context/log.
 

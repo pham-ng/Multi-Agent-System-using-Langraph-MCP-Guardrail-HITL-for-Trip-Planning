@@ -155,6 +155,17 @@
     bubble.querySelector(".answer-content").innerHTML = markdown(data.answer);
     const values = { flight: data.flight_results, hotel: data.hotel_results, weather: data.weather_result, budget: data.budget_results, itinerary: data.itinerary };
     Object.entries(values).forEach(([key, value]) => { bubble.querySelector(`[data-panel="${key}"]`).textContent = displayValue(value); });
+    const groundingStatus = bubble.querySelector(".grounding-status");
+    if (data.grounding_status === "verified") {
+      groundingStatus.textContent = "✓ Đã kiểm chứng";
+      groundingStatus.dataset.state = "verified";
+    } else if (data.grounding_status === "blocked") {
+      groundingStatus.textContent = "! Đã chặn vì thiếu bằng chứng";
+      groundingStatus.dataset.state = "blocked";
+    } else {
+      groundingStatus.textContent = "Đang kiểm chứng";
+      groundingStatus.dataset.state = "pending";
+    }
     if (typeof data.llm_calls === "number") bubble.querySelector(".llm-calls").textContent = `${data.llm_calls} lần gọi AI`;
     bubble.querySelector(".agents-used").textContent = formatAgents(data.selected_agents);
     setupTabs(bubble);

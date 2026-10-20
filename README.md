@@ -326,6 +326,7 @@ Nguyên tắc quan trọng:
 - `user_query` là request gốc; draft không được ghi đè request.
 - Control state (`approved`, `guardrail_allowed`, `thread_id`) tách khỏi evidence.
 - MCP/provider output được coi là **data không đáng tin**, không phải instruction cho model.
+- Calendar arithmetic không giao cho LLM: code Python tính weekday từ ngày cụ thể; nếu người dùng chưa cho ngày, prompt bắt buộc dùng `Day 1`, `Day 2` và không được tự bịa thứ/ngày.
 - Resume chỉ gửi `thread_id`, `approved`, `feedback`; server lấy evidence cũ từ checkpoint.
 - Không đưa API key, `DATABASE_URL` hoặc secret vào context/log.
 

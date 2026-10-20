@@ -19,6 +19,7 @@ TripMate là một ứng dụng lập kế hoạch du lịch đa agent. Người
 - [Context engineering](#context-engineering)
 - [Human-in-the-loop](#human-in-the-loop)
 - [Database schema](#database-schema)
+- [History và quản lý context](#history-và-quản-lý-context)
 - [Cấu trúc dự án](#cấu-trúc-dự-án)
 - [Cài đặt local](#cài-đặt-local)
 - [API](#api)
@@ -203,7 +204,7 @@ Prompt của budget, itinerary và final agent đều yêu cầu:
 - phân biệt live data với recommendation;
 - nhắc người dùng xác minh availability, giá cuối và chính sách hủy.
 
-Đây là guardrail ở tầng prompt, không phải bằng chứng tuyệt đối. Production nên bổ sung validation/schema và observability cho output của model.
+Đây là guardrail ở tầng prompt, không phải bằng chứng tuyệt đối. Guardrail và supervisor hiện đã dùng Pydantic schema để validate JSON; nếu output không hợp lệ, hệ thống fallback an toàn.
 
 ### 6. Context khi resume HITL
 
@@ -279,6 +280,57 @@ erDiagram
 
 Không xóa các bảng `checkpoint_*` trong production nếu chưa hiểu tác động: xóa chúng sẽ làm mất khả năng resume các thread cũ. Nếu cần cleanup, hãy tạo policy theo tuổi dữ liệu và backup trước.
 
+## History và quản lý context
+
+### Có lưu history không?
+
+Có. Mỗi request được gắn với một `thread_id`. LangGraph ghi các checkpoint của thread vào PostgreSQL, gồm state, bước đang chạy, draft itinerary, approval state và kết quả cuối. Khi service restart, người dùng vẫn có thể resume approval bằng đúng `thread_id`.
+
+UI hiện có thêm khu vực **HISTORY** ở sidebar:
+
+1. Các phiên gần đây được liệt kê từ PostgreSQL.
+2. Bấm vào một phiên để tải lại request, draft/final answer và evidence của các agent.
+3. `localStorage` chỉ giữ `thread_id` đang mở trên trình duyệt; dữ liệu thật vẫn nằm ở PostgreSQL.
+4. Nút **Cuộc trò chuyện mới** tạo một thread mới, không xóa dữ liệu cũ.
+
+API history:
+
+| Endpoint | Mục đích |
+| --- | --- |
+| `GET /api/threads?limit=30` | Liệt kê phiên, chỉ trả summary an toàn |
+| `GET /api/threads/{thread_id}` | Đọc state mới nhất của một phiên |
+| `GET /api/threads/{thread_id}/history?limit=50` | Xem audit trail các checkpoint |
+| `DELETE /api/threads/{thread_id}` | Xóa một phiên khi gửi `X-Admin-Token` đúng |
+
+> Chỉ bật `HISTORY_ADMIN_TOKEN` nếu bạn thật sự cần cleanup bằng API. Endpoint xóa không có giao diện public để tránh xóa nhầm. Trong sản phẩm nhiều người dùng, cần thêm authentication/authorization theo user trước khi public history.
+
+### Context engineering đang hoạt động như thế nào?
+
+Hệ thống không gửi toàn bộ database hoặc toàn bộ response provider vào mỗi prompt. Mỗi agent nhận một **context packet** có version (`tripmate.v1`) gồm request gốc, constraints, routing và evidence liên quan. Evidence được clip theo giới hạn ký tự trước khi đưa vào LLM.
+
+Luồng context:
+
+```text
+User request
+    -> Guardrail decision (Pydantic)
+    -> Supervisor routing + normalized constraints (Pydantic)
+    -> Specialist evidence (flight / hotel / weather)
+    -> Budget context packet
+    -> Itinerary context packet
+    -> Human approval
+    -> Final context packet + feedback
+```
+
+Nguyên tắc quan trọng:
+
+- `user_query` là request gốc; draft không được ghi đè request.
+- Control state (`approved`, `guardrail_allowed`, `thread_id`) tách khỏi evidence.
+- MCP/provider output được coi là **data không đáng tin**, không phải instruction cho model.
+- Resume chỉ gửi `thread_id`, `approved`, `feedback`; server lấy evidence cũ từ checkpoint.
+- Không đưa API key, `DATABASE_URL` hoặc secret vào context/log.
+
+Nếu muốn thêm agent, hãy xác định rõ agent đó đọc field nào, ghi field nào, giới hạn context bao nhiêu và evidence sẽ xuất hiện ở tab nào trên UI.
+
 ## Cấu trúc dự án
 
 ```text
@@ -323,7 +375,9 @@ Copy-Item .env.example .env
 | Variable | Bắt buộc | Dùng cho |
 | --- | --- | --- |
 | `GROQ_API_KEY` | Có | Guardrail, supervisor, budget, itinerary, final answer |
+| `GROQ_MODEL` | Không | Model Groq, mặc định `openai/gpt-oss-120b` |
 | `DATABASE_URL` | Có | LangGraph PostgreSQL checkpointer |
+| `HISTORY_ADMIN_TOKEN` | Không | Cho phép xóa thread qua API khi cần cleanup |
 | `AVIATIONSTACK_API_KEY` | Khuyến nghị | Flight API |
 | `OPEN_WEATHER_API_KEY` | Khuyến nghị | Weather MCP |
 | `TAVILY_API_KEY` | Khuyến nghị | Hotel/web search MCP |
@@ -351,7 +405,12 @@ Endpoints chính:
 
 - `GET /` — TripMate web UI.
 - `GET /health` — liveness check.
+- `GET /ready` — kiểm tra database readiness.
 - `POST /api/travel` — start/resume workflow.
+- `GET /api/threads` — danh sách phiên đã lưu.
+- `GET /api/threads/{thread_id}` — tải lại một phiên.
+- `GET /api/threads/{thread_id}/history` — audit trail checkpoint.
+- `DELETE /api/threads/{thread_id}` — xóa phiên với `X-Admin-Token`.
 - `GET /docs` — OpenAPI Swagger UI.
 
 ## API bằng ví dụ
@@ -509,6 +568,8 @@ Invoke-WebRequest http://127.0.0.1:8000/ -UseBasicParsing
 | Thiếu API key | UI/API trả trạng thái unavailable rõ ràng |
 | Sai/mất database | Startup/request fail có log dễ chẩn đoán |
 | Refresh trong lúc chờ approval | User vẫn giữ `thread_id` để resume |
+| Mở lại app | Sidebar HISTORY tải lại các thread từ PostgreSQL |
+| `/ready` | Trả `200` khi checkpointer/database truy cập được |
 
 ### Observability
 
@@ -561,14 +622,15 @@ Model hiện tại là `openai/gpt-oss-120b` qua `ChatGroq`. Khi đổi model:
 - chạy lại guardrail, routing, revision và final-answer tests;
 - không bỏ approval gate chỉ vì model mới có vẻ đáng tin hơn.
 
-### Thêm structured output
+### Structured output
 
-Production nên nâng cấp các bước guardrail/supervisor từ parse JSON thủ công sang schema validation nghiêm ngặt, ví dụ Pydantic model. Vẫn cần fallback block an toàn khi output không hợp lệ.
+Guardrail và supervisor đã dùng Pydantic model để validate JSON. Khi model trả sai schema, guardrail fail closed hoặc supervisor fallback chạy plan đầy đủ. Nếu thêm node trả JSON, nên tạo schema riêng, giới hạn enum/field và kiểm thử cả trường hợp model trả markdown fence hoặc dữ liệu thiếu.
 
 ## Security checklist
 
 - Không commit `.env`, API keys, database URLs hoặc access tokens.
 - Không log giá trị secret.
+- Xem `thread_id` như một bearer identifier; không chia sẻ công khai khi chưa có authentication.
 - Giới hạn quyền database theo môi trường.
 - Dùng external database URL với TLS và IP allowlist khi bắt buộc.
 - Không coi dữ liệu provider hoặc nội dung web là instruction đáng tin cậy.

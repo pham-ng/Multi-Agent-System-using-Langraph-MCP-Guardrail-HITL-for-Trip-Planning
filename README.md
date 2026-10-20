@@ -347,8 +347,14 @@ Nếu muốn thêm agent, hãy xác định rõ agent đó đọc field nào, gh
 │   └── index.html                 # Web UI markup
 └── static/
     ├── script.js                  # Frontend behavior
-    └── style.css                  # Design system/responsive UI
+    ├── style.css                  # Light, friendly design system/responsive UI
+    └── assets/
+        └── vietnam-hero.png       # Hero image inspired by Vietnam
 ```
+
+### UI direction
+
+Giao diện production dùng nền sáng, màu xanh ngọc chủ đạo, điểm nhấn vàng/coral và hero image Việt Nam. Layout vẫn responsive: sidebar history/pipeline hiển thị trên desktop, còn chat và approval flow được tối ưu cho mobile.
 
 ## Cài đặt local
 

@@ -302,7 +302,7 @@ Migration tham chiếu nằm ở `migrations/001_enterprise.sql`; code cũng ch�
 | --- | --- |
 | `app_users` | Email, display name, password hash và trạng thái tài khoản |
 | `app_sessions` | Chỉ lưu hash của session token, không lưu token thô |
-| `trip_metadata` | Ownership, title, archive state và timestamp của trip |
+| `trip_metadata` | Ownership, title, archive state, share token hash và timestamp của trip |
 | `audit_events` | Audit event theo user/thread/request id |
 
 Trong production nên chạy migration bằng job riêng, bật backup/restore drill, retention policy và thay local password auth bằng OIDC provider khi hệ thống có nhiều tổ chức.
@@ -331,6 +331,9 @@ API history:
 | `DELETE /api/threads/{thread_id}` | Xóa trip mà user sở hữu |
 | `GET /api/threads/{thread_id}/export?format=markdown` | Tải bản Markdown |
 | `GET /api/threads/{thread_id}/export?format=ics` | Tải iCalendar |
+| `POST /api/threads/{thread_id}/share` | Tạo bearer link read-only, hết hạn sau 72 giờ |
+| `DELETE /api/threads/{thread_id}/share` | Thu hồi link chia sẻ |
+| `GET /shared/{token}` | Đọc final answer qua link chia sẻ |
 
 Auth endpoints:
 

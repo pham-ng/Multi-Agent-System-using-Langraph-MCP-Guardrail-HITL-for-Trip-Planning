@@ -28,9 +28,12 @@ from backend import (
     delete_travel_thread,
     app_connection,
     archive_trip,
+    create_share_token,
     get_travel_thread,
     get_travel_thread_history,
+    get_shared_trip,
     list_travel_threads,
+    revoke_share_token,
     rename_trip,
     run_travel_agent,
 )
@@ -306,6 +309,36 @@ def export_thread(thread_id: str, request: Request, format: str = Query(default=
         return PlainTextResponse(content=content, media_type="text/markdown", headers={"Content-Disposition": f'attachment; filename="tripmate-{thread_id}.md"'})
     except PermissionError as exc:
         return JSONResponse(status_code=403, content={"success": False, "code": "forbidden", "error": str(exc)})
+
+
+@app.post("/api/threads/{thread_id}/share")
+def share_thread(thread_id: str, request: Request):
+    try:
+        token = create_share_token(thread_id, _current_user(request)["id"])
+        return {"success": True, "expires_in_hours": 72, "url": f"{str(request.base_url).rstrip('/')}/shared/{token}"}
+    except PermissionError as exc:
+        return JSONResponse(status_code=403, content={"success": False, "code": "forbidden", "error": str(exc)})
+
+
+@app.delete("/api/threads/{thread_id}/share")
+def unshare_thread(thread_id: str, request: Request):
+    try:
+        revoke_share_token(thread_id, _current_user(request)["id"])
+        return {"success": True}
+    except PermissionError as exc:
+        return JSONResponse(status_code=403, content={"success": False, "code": "forbidden", "error": str(exc)})
+
+
+@app.get("/shared/{token}")
+def shared_thread(token: str):
+    try:
+        result = get_shared_trip(token)
+        if not result:
+            return JSONResponse(status_code=404, content={"success": False, "code": "share_expired", "error": "Liên kết chia sẻ không tồn tại hoặc đã hết hạn."})
+        return result
+    except Exception:
+        logger.exception("shared_thread_failed")
+        return JSONResponse(status_code=503, content={"success": False, "code": "share_unavailable", "error": "Không thể tải liên kết chia sẻ lúc này."})
 
 
 @app.delete("/api/threads/{thread_id}")

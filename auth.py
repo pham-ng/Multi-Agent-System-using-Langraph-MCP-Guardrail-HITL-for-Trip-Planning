@@ -86,6 +86,11 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+def hash_token(token: str) -> str:
+    """Hash bearer-style tokens before storing or comparing them in Postgres."""
+    return _hash_token(token)
+
+
 def ensure_auth_schema(connection: Any) -> None:
     """Create app-owned tables; LangGraph checkpoint tables remain separate."""
     with connection.cursor() as cursor:
@@ -121,11 +126,15 @@ def ensure_auth_schema(connection: Any) -> None:
                 user_id TEXT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
                 title TEXT NOT NULL DEFAULT 'Chuyến đi mới',
                 archived BOOLEAN NOT NULL DEFAULT FALSE,
+                share_token_hash TEXT,
+                share_expires_at TIMESTAMPTZ,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
             """
         )
+        cursor.execute("ALTER TABLE trip_metadata ADD COLUMN IF NOT EXISTS share_token_hash TEXT")
+        cursor.execute("ALTER TABLE trip_metadata ADD COLUMN IF NOT EXISTS share_expires_at TIMESTAMPTZ")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trip_metadata_user ON trip_metadata(user_id, updated_at DESC)")
         cursor.execute(
             """

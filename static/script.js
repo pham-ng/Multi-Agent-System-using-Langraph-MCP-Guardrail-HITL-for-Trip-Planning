@@ -303,9 +303,13 @@
   }
   async function shareActiveTrip() {
     if (!threadId) return;
-    const shareText = `${window.location.origin}/?thread=${encodeURIComponent(threadId)}`;
-    try { await navigator.clipboard.writeText(shareText); setSystemStatus("complete"); systemStatusHint.textContent = "Đã sao chép liên kết phiên hiện tại"; }
-    catch (error) { window.prompt("Sao chép liên kết này", shareText); }
+    try {
+      const response = await fetch(`/api/threads/${encodeURIComponent(threadId)}/share`, { method: "POST" });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.error || "Không thể tạo liên kết chia sẻ.");
+      await navigator.clipboard.writeText(data.url);
+      setSystemStatus("complete"); systemStatusHint.textContent = "Đã sao chép liên kết chia sẻ (hết hạn sau 72 giờ)";
+    } catch (error) { addError(error.message, false); }
   }
   async function send(text) {
     if (sending || !text.trim()) return;

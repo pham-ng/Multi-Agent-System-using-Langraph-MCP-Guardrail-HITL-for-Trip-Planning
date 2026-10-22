@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS trip_metadata (
     user_id TEXT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
     title TEXT NOT NULL DEFAULT 'Chuyến đi mới',
     archived BOOLEAN NOT NULL DEFAULT FALSE,
+    share_token_hash TEXT,
+    share_expires_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

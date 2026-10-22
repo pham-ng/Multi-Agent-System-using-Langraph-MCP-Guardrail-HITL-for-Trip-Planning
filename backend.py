@@ -3,6 +3,7 @@ import json
 import operator
 import os
 import re
+import secrets
 import threading
 import uuid
 from datetime import date, datetime, timezone
@@ -22,7 +23,7 @@ from pydantic import BaseModel, Field
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from auth import ensure_auth_schema
+from auth import ensure_auth_schema, hash_token
 from mcp_client import extract_destination, forecast_mcp_search, tavily_mcp_search, weather_mcp_search
 
 load_dotenv()
@@ -823,6 +824,49 @@ def archive_trip(thread_id: str, user_id: str, archived: bool = True) -> dict[st
     if not row:
         raise KeyError("Trip not found")
     return dict(row)
+
+
+def create_share_token(thread_id: str, user_id: str, ttl_hours: int = 72) -> str:
+    assert_trip_owner(thread_id, user_id)
+    token = secrets.token_urlsafe(32)
+    connection = app_connection()
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE trip_metadata SET share_token_hash = %s, share_expires_at = NOW() + (%s * INTERVAL '1 hour'), updated_at = NOW() WHERE thread_id = %s AND user_id = %s",
+            (hash_token(token), max(1, min(int(ttl_hours), 24 * 30)), thread_id, user_id),
+        )
+    return token
+
+
+def revoke_share_token(thread_id: str, user_id: str) -> None:
+    assert_trip_owner(thread_id, user_id)
+    connection = app_connection()
+    with connection.cursor() as cursor:
+        cursor.execute("UPDATE trip_metadata SET share_token_hash = NULL, share_expires_at = NULL, updated_at = NOW() WHERE thread_id = %s AND user_id = %s", (thread_id, user_id))
+
+
+def get_shared_trip(token: str) -> dict[str, Any] | None:
+    if not token or len(token) > 200:
+        return None
+    connection = app_connection()
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT thread_id, title FROM trip_metadata WHERE share_token_hash = %s AND share_expires_at > NOW() AND archived = FALSE", (hash_token(token),))
+        row = cursor.fetchone()
+    if not row:
+        return None
+    snapshot = get_travel_graph().get_state({"configurable": {"thread_id": row["thread_id"]}})
+    values = dict(getattr(snapshot, "values", {}) or {})
+    if not values.get("user_query"):
+        return None
+    result = _result_from_values(row["thread_id"], values, _status_for_values(values, tuple(getattr(snapshot, "next", ()) or ())))
+    return {
+        "success": True,
+        "thread_id": row["thread_id"],
+        "title": row["title"],
+        "answer": result["answer"],
+        "status": result["status"],
+        "grounding_status": result["grounding_status"],
+    }
 
 
 def _initial_state(user_input: str) -> dict[str, Any]:

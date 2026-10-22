@@ -377,6 +377,13 @@ async def health_check():
 
 @app.get("/ready")
 async def readiness_check():
+    configuration_issues = []
+    if auth_required() and not os.getenv("APP_SECRET_KEY", "").strip():
+        configuration_issues.append("APP_SECRET_KEY is required when AUTH_REQUIRED=true")
+    if auth_required() and os.getenv("COOKIE_SECURE", "true").lower() not in {"1", "true", "yes", "on"}:
+        configuration_issues.append("COOKIE_SECURE must be enabled when AUTH_REQUIRED=true")
+    if configuration_issues:
+        return JSONResponse(status_code=503, content={"status": "not_ready", "database": "configuration invalid", "issues": configuration_issues})
     ready, detail = database_ready()
     payload = {"status": "ready" if ready else "not_ready", "database": detail}
     return JSONResponse(status_code=200 if ready else 503, content=payload)

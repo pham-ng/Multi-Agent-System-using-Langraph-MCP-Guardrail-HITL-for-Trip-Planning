@@ -45,6 +45,10 @@
   };
 
   function bottom() { chatLog.scrollTop = chatLog.scrollHeight; }
+  function revealMessage(messageNode) {
+    if (!messageNode) return;
+    requestAnimationFrame(() => messageNode.scrollIntoView({ block: "start", behavior: "smooth" }));
+  }
   function setSystemStatus(state) {
     const copy = statusCopy[state] || statusCopy.ready;
     systemStatus.textContent = copy[0];
@@ -222,8 +226,9 @@
       });
       box.querySelectorAll(".quick-feedback").forEach((button) => button.addEventListener("click", () => resumeApproval(false, button.dataset.feedback || "", box)));
     }
+    const messageNode = node.firstElementChild;
     chatLog.appendChild(node);
-    bottom();
+    revealMessage(messageNode);
     applyDataStatus(data);
     loadThreads();
   }

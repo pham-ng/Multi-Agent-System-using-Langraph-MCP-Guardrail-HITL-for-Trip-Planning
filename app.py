@@ -53,6 +53,7 @@ from job_worker import worker as travel_job_worker
 logger = logging.getLogger("tripmate.api")
 
 BASE_DIR = Path(__file__).resolve().parent
+APP_VERSION = "2.4.0"
 
 
 @asynccontextmanager
@@ -69,7 +70,7 @@ async def lifespan(_app):
 app = FastAPI(
     title="AI Travel Planning Agent System",
     description="LangGraph travel planner with guardrail and human approval",
-    version="2.3.0",
+    version=APP_VERSION,
     lifespan=lifespan,
 )
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
@@ -190,6 +191,7 @@ async def request_context(request: Request, call_next):
     else:
         response = await call_next(request)
     response.headers["X-Request-ID"] = request.state.request_id
+    response.headers["X-App-Version"] = APP_VERSION
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
@@ -372,7 +374,7 @@ def me(request: Request):
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "message": "AI Travel Planner is running"}
+    return {"status": "ok", "version": APP_VERSION, "message": "AI Travel Planner is running"}
 
 
 @app.get("/ready")

@@ -404,6 +404,8 @@ Nếu muốn thêm agent, hãy xác định rõ agent đó đọc field nào, gh
 ```text
 .
 ├── app.py                         # FastAPI entrypoint
+├── job_worker.py                  # Durable PostgreSQL queue worker
+├── reliability.py                 # Retry/backoff/circuit breaker primitives
 ├── auth.py                        # Account/session/password layer
 ├── backend.py                     # LangGraph workflow + agents
 ├── mcp_client.py                  # MCP clients và provider adapters
@@ -411,7 +413,9 @@ Nếu muốn thêm agent, hãy xác định rõ agent đó đọc field nào, gh
 ├── requirements.txt               # Python dependencies
 ├── Dockerfile                     # Production container
 ├── render.yaml                    # Render Blueprint
-├── migrations/001_enterprise.sql   # App-owned database schema
+├── migrations/001_enterprise.sql   # Initial app-owned schema
+├── migrations/002_production_hardening.sql # Jobs, reset tokens, indexes
+├── scripts/backup_db.ps1           # pg_dump backup helper
 ├── requirements-dev.txt            # Test dependencies
 ├── tests/                          # Unit/API regression tests
 ├── .github/workflows/ci.yml        # CI checks

@@ -737,7 +737,6 @@ Candidate answer (possibly clipped for verification):
                 "You are a hostile fact-checker. Fail closed when evidence is insufficient.",
                 verifier_prompt,
                 max_tokens=800,
-                response_format={"type": "json_object"},
             )),
         )
     except Exception as exc:

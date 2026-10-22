@@ -8,6 +8,7 @@ import certifi
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from observability import record_llm_usage
 from reliability import CircuitBreaker, async_call_with_retry
 
 os.environ["SSL_CERT_FILE"] = certifi.where()
@@ -113,4 +114,5 @@ def extract_destination(query: str) -> str:
     response = llm.invoke(
         f"Extract only the destination city or country from this travel request. Return only its name.\n{query}"
     )
+    record_llm_usage(response, model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"))
     return str(response.content).strip()

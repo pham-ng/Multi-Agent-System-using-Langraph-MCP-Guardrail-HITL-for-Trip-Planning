@@ -41,6 +41,10 @@ services:
         sync: false
       - key: PASSWORD_RESET_DEBUG
         value: "false"
+      - key: LLM_INPUT_COST_PER_1M_USD
+        value: "0"
+      - key: LLM_OUTPUT_COST_PER_1M_USD
+        value: "0"
       - key: DEFAULT_ORIGIN_IATA
         value: SGN
       - key: LANGSMITH_TRACING

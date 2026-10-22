@@ -370,6 +370,17 @@ Auth endpoints:
 
 Khi `AUTH_REQUIRED=true`, mọi trip/history phải có session hợp lệ. Khi local development dùng `AUTH_REQUIRED=false`, hệ thống chạy bằng user `guest` để không cản trở việc test workflow.
 
+### Observability và cost monitoring
+
+`GET /internal/metrics` yêu cầu header `X-Metrics-Token` và trả:
+
+- request counters theo method/path/status;
+- p50/p95/max latency;
+- số lần gọi LLM và input/output/total tokens nếu provider trả usage metadata;
+- estimated cost theo `LLM_INPUT_COST_PER_1M_USD` và `LLM_OUTPUT_COST_PER_1M_USD`.
+
+Metrics là bộ đếm in-process, không chứa prompt hoặc completion và sẽ reset khi instance restart. Với nhiều instance, nên scrape endpoint này bằng agent metrics hoặc chuyển tracker sang OpenTelemetry/Prometheus trước khi đặt SLO/billing alert.
+
 ### Context engineering đang hoạt động như thế nào?
 
 Hệ thống không gửi toàn bộ database hoặc toàn bộ response provider vào mỗi prompt. Mỗi agent nhận một **context packet** có version (`tripmate.v1`) gồm request gốc, constraints, routing và evidence liên quan. Evidence được clip theo giới hạn ký tự trước khi đưa vào LLM.
@@ -406,6 +417,7 @@ Nếu muốn thêm agent, hãy xác định rõ agent đó đọc field nào, gh
 ├── app.py                         # FastAPI entrypoint
 ├── job_worker.py                  # Durable PostgreSQL queue worker
 ├── reliability.py                 # Retry/backoff/circuit breaker primitives
+├── observability.py               # Token/cost usage counters for protected metrics
 ├── auth.py                        # Account/session/password layer
 ├── backend.py                     # LangGraph workflow + agents
 ├── mcp_client.py                  # MCP clients và provider adapters
@@ -470,6 +482,8 @@ Copy-Item .env.example .env
 | `MCP_TOOL_TIMEOUT_SECONDS` | Không | Timeout cho mỗi MCP/tool call, mặc định `45` giây |
 | `METRICS_TOKEN` | Production: khuyến nghị | Bảo vệ `GET /internal/metrics` |
 | `PASSWORD_RESET_DEBUG` | Local only | Trả token reset trong response để test; luôn `false` trên production |
+| `LLM_INPUT_COST_PER_1M_USD` | Không | Giá ước tính input token để metrics, mặc định `0` |
+| `LLM_OUTPUT_COST_PER_1M_USD` | Không | Giá ước tính output token để metrics, mặc định `0` |
 | `HISTORY_ADMIN_TOKEN` | Legacy | Giữ cho compatibility; ownership vẫn được kiểm tra |
 | `AVIATIONSTACK_API_KEY` | Khuyến nghị | Flight API |
 | `OPEN_WEATHER_API_KEY` | Khuyến nghị | Weather MCP |

@@ -49,6 +49,7 @@ from backend import (
     run_travel_agent,
 )
 from job_worker import worker as travel_job_worker
+from observability import llm_usage_snapshot
 
 logger = logging.getLogger("tripmate.api")
 
@@ -405,6 +406,7 @@ def internal_metrics(request: Request):
             "success": True,
             "requests": dict(request_metrics),
             "latency_ms": {"count": count, "p50": latencies[int(count * 0.50)] if count else 0, "p95": p95, "max": latencies[-1] if count else 0},
+            "llm_usage": llm_usage_snapshot(),
         }
 
 

@@ -27,6 +27,7 @@ from psycopg.types.json import Jsonb
 
 from auth import ensure_auth_schema, hash_token
 from mcp_client import extract_destination, forecast_mcp_search, tavily_mcp_search, weather_mcp_search
+from observability import llm_usage_snapshot, record_llm_usage
 from reliability import CircuitBreaker, call_with_retry
 
 load_dotenv()
@@ -152,6 +153,7 @@ def _llm_text(
         SystemMessage(content=system_prompt),
         HumanMessage(content=user_prompt),
     ])
+    record_llm_usage(response, model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"))
     return str(response.content)
 
 

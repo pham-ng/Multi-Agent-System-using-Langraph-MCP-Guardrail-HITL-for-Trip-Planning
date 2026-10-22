@@ -55,9 +55,9 @@ class SupervisorDecision(BaseModel):
 
 class FinalPlanDecision(BaseModel):
     answer: str = ""
-    verified_facts: list[str] = Field(default_factory=list)
-    estimates: list[str] = Field(default_factory=list)
-    unknowns: list[str] = Field(default_factory=list)
+    verified_facts: list[Any] = Field(default_factory=list)
+    estimates: list[Any] = Field(default_factory=list)
+    unknowns: list[Any] = Field(default_factory=list)
 
 
 class GroundingReport(BaseModel):
@@ -354,8 +354,14 @@ def _provider_gaps(state: TravelState) -> list[str]:
 
 def _render_grounded_plan(plan: FinalPlanDecision, state: TravelState) -> str:
     answer = _normalize_calendar_claims(plan.answer.strip())
-    estimates = list(plan.estimates)
-    unknowns = list(dict.fromkeys([*plan.unknowns, *_provider_gaps(state)]))
+    def format_item(item: Any) -> str:
+        if isinstance(item, dict):
+            return "; ".join(f"{key}: {value}" for key, value in item.items())
+        return str(item)
+
+    estimates = [format_item(item) for item in plan.estimates]
+    unknowns = [format_item(item) for item in plan.unknowns]
+    unknowns = list(dict.fromkeys([*unknowns, *_provider_gaps(state)]))
     if estimates:
         answer += "\n\n### Estimates & recommendations\n" + "\n".join(f"- {item}" for item in estimates)
     if unknowns:

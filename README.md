@@ -365,7 +365,7 @@ Auth endpoints:
 | `POST /api/auth/login` | Tạo HttpOnly session cookie |
 | `POST /api/auth/logout` | Thu hồi session |
 | `GET /api/auth/me` | Kiểm tra session và auth mode |
-| `POST /api/auth/password-reset/request` | Tạo reset token đã hash; production nối thêm email provider |
+| `POST /api/auth/password-reset/request` | Tạo reset token đã hash và gửi email khi SMTP đã cấu hình |
 | `POST /api/auth/password-reset/confirm` | Đổi mật khẩu bằng token còn hạn |
 
 Khi `AUTH_REQUIRED=true`, mọi trip/history phải có session hợp lệ. Khi local development dùng `AUTH_REQUIRED=false`, hệ thống chạy bằng user `guest` để không cản trở việc test workflow.
@@ -483,6 +483,8 @@ Copy-Item .env.example .env
 | `MCP_TOOL_TIMEOUT_SECONDS` | Không | Timeout cho mỗi MCP/tool call, mặc định `45` giây |
 | `METRICS_TOKEN` | Production: khuyến nghị | Bảo vệ `GET /internal/metrics` |
 | `PASSWORD_RESET_DEBUG` | Local only | Trả token reset trong response để test; luôn `false` trên production |
+| `PASSWORD_RESET_BASE_URL` | Khi bật email | URL frontend nhận query `?token=...` |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_TLS` | Khi bật email | SMTP delivery cho password reset; không commit secret |
 | `LLM_INPUT_COST_PER_1M_USD` | Không | Giá ước tính input token để metrics, mặc định `0` |
 | `LLM_OUTPUT_COST_PER_1M_USD` | Không | Giá ước tính output token để metrics, mặc định `0` |
 | `HISTORY_ADMIN_TOKEN` | Legacy | Giữ cho compatibility; ownership vẫn được kiểm tra |

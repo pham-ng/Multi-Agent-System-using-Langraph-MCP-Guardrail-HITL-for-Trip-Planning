@@ -41,6 +41,20 @@ services:
         sync: false
       - key: PASSWORD_RESET_DEBUG
         value: "false"
+      - key: PASSWORD_RESET_BASE_URL
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USERNAME
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: SMTP_TLS
+        value: "true"
       - key: LLM_INPUT_COST_PER_1M_USD
         value: "0"
       - key: LLM_OUTPUT_COST_PER_1M_USD

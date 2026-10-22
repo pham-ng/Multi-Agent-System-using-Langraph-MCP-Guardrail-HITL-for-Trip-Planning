@@ -27,6 +27,7 @@ from auth import (
     get_user_from_session,
     revoke_session,
     reset_password,
+    send_password_reset_email,
     validate_password,
 )
 from backend import (
@@ -327,11 +328,17 @@ def logout(request: Request):
 @app.post("/api/auth/password-reset/request")
 def password_reset_request(request_data: PasswordResetRequest, request: Request):
     try:
+        if not rate_limiter.allow(f"password-reset:{request_data.email.strip().lower()}:{request.client.host if request.client else 'unknown'}"):
+            return {"success": True, "message": "Nếu email tồn tại, hướng dẫn đặt lại mật khẩu sẽ được gửi."}
         token = create_password_reset_token(app_connection(), request_data.email)
-        # A mail provider can be connected later without changing this API contract.
         payload = {"success": True, "message": "Nếu email tồn tại, hướng dẫn đặt lại mật khẩu sẽ được gửi."}
         if token and os.getenv("PASSWORD_RESET_DEBUG", "false").lower() in {"1", "true", "yes"}:
             payload["debug_token"] = token
+        elif token:
+            try:
+                send_password_reset_email(request_data.email, token)
+            except Exception:
+                logger.exception("password_reset_email_failed request_id=%s", _request_id(request))
         return payload
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"success": False, "code": "invalid_auth", "error": str(exc), "request_id": _request_id(request)})

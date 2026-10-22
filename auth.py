@@ -13,9 +13,11 @@ import json
 import os
 import re
 import secrets
+import smtplib
 import time
 import uuid
 from datetime import datetime, timezone
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 
@@ -310,6 +312,35 @@ def reset_password(connection: Any, token: str, password: str) -> bool:
             cursor.execute("UPDATE password_reset_tokens SET used_at = NOW() WHERE token_hash = %s", (_hash_token(token),))
             cursor.execute("DELETE FROM app_sessions WHERE user_id = %s", (row["user_id"],))
     connection.commit()
+    return True
+
+
+def send_password_reset_email(email: str, token: str) -> bool:
+    """Send a reset link when SMTP is configured; never log or return the token."""
+    host = os.getenv("SMTP_HOST", "").strip()
+    sender = os.getenv("SMTP_FROM", "").strip()
+    base_url = os.getenv("PASSWORD_RESET_BASE_URL", "").strip().rstrip("/")
+    if not host or not sender or not base_url:
+        return False
+    message = EmailMessage()
+    message["Subject"] = "Đặt lại mật khẩu TripMate"
+    message["From"] = sender
+    message["To"] = normalize_email(email)
+    message.set_content(
+        "Bạn vừa yêu cầu đặt lại mật khẩu. Link này có hiệu lực trong 30 phút:\n\n"
+        f"{base_url}?token={token}\n\n"
+        "Nếu bạn không thực hiện yêu cầu này, hãy bỏ qua email này."
+    )
+    port = int(os.getenv("SMTP_PORT", "587"))
+    username = os.getenv("SMTP_USERNAME", "").strip()
+    password = os.getenv("SMTP_PASSWORD", "")
+    use_tls = os.getenv("SMTP_TLS", "true").lower() in {"1", "true", "yes", "on"}
+    with smtplib.SMTP(host, port, timeout=15) as smtp:
+        if use_tls:
+            smtp.starttls()
+        if username:
+            smtp.login(username, password)
+        smtp.send_message(message)
     return True
 
 

@@ -7,6 +7,7 @@ import uuid
 from collections import Counter
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import uvicorn
 from fastapi import FastAPI, Header, Query, Request
@@ -160,11 +161,34 @@ def _clear_session(response: Response) -> None:
     response.delete_cookie(SESSION_COOKIE, path="/")
 
 
+def _same_origin_request(request: Request) -> bool:
+    """Reject cross-site state changes when a browser session cookie is present."""
+    if request.method not in {"POST", "PUT", "PATCH", "DELETE"} or not request.cookies.get(SESSION_COOKIE):
+        return True
+    origin = request.headers.get("origin")
+    if not origin:
+        return True  # non-browser clients commonly omit Origin; cookie remains HttpOnly.
+    parsed = urlsplit(origin)
+    expected_host = request.headers.get("host", "").lower()
+    return parsed.scheme in {"http", "https"} and parsed.netloc.lower() == expected_host
+
+
 @app.middleware("http")
 async def request_context(request: Request, call_next):
     request.state.request_id = request.headers.get("X-Request-ID", uuid.uuid4().hex[:20])
     start = time.perf_counter()
-    response = await call_next(request)
+    if not _same_origin_request(request):
+        response = JSONResponse(
+            status_code=403,
+            content={
+                "success": False,
+                "code": "csrf_blocked",
+                "error": "Yêu cầu không hợp lệ từ nguồn khác.",
+                "request_id": request.state.request_id,
+            },
+        )
+    else:
+        response = await call_next(request)
     response.headers["X-Request-ID"] = request.state.request_id
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"

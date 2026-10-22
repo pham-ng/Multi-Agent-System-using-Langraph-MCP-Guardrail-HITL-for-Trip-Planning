@@ -20,4 +20,6 @@ jobs:
       - name: Python tests
         run: pytest -q
       - name: Compile checks
-        run: python -m py_compile auth.py backend.py app.py
+        run: python -m py_compile auth.py backend.py app.py mcp_client.py observability.py reliability.py job_worker.py scripts/smoke_async.py
+      - name: Frontend syntax check
+        run: node --check static/script.js

@@ -132,7 +132,7 @@ async def request_context(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-    response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' https://cdnjs.cloudflare.com; connect-src 'self'; font-src 'self' https://cdnjs.cloudflare.com"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self' https://cdnjs.cloudflare.com; connect-src 'self'; font-src 'self' https://cdnjs.cloudflare.com https://fonts.gstatic.com"
     logger.info("request method=%s path=%s status=%s latency_ms=%.1f request_id=%s", request.method, request.url.path, response.status_code, (time.perf_counter() - start) * 1000, request.state.request_id)
     return response
 

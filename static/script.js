@@ -16,11 +16,23 @@
   const aiTpl = document.getElementById("aiBubbleTpl");
   const loadingTpl = document.getElementById("loadingBubbleTpl");
   const errorTpl = document.getElementById("errorBubbleTpl");
+  const authModal = document.getElementById("authModal");
+  const authBtn = document.getElementById("authBtn");
+  const authClose = document.getElementById("authClose");
+  const authError = document.getElementById("authError");
+  const loginForm = document.getElementById("loginForm");
+  const signupForm = document.getElementById("signupForm");
+  const loginModeBtn = document.getElementById("loginModeBtn");
+  const signupModeBtn = document.getElementById("signupModeBtn");
+  const tripActions = document.getElementById("tripActions");
+  const inspector = document.getElementById("inspector");
+  const drawerBackdrop = document.getElementById("drawerBackdrop");
   const THREAD_STORAGE_KEY = "tripmate.activeThreadId";
 
   let threadId = null;
   let sending = false;
   let lastMessage = "";
+  let currentUser = null;
   const statusCopy = {
     ready: ["Sẵn sàng lập kế hoạch", "Các agent đang chờ yêu cầu của bạn"],
     working: ["Đang xử lý yêu cầu", "Guardrail và supervisor đang điều phối"],
@@ -55,6 +67,31 @@
   function shortThread(id) { return id ? `${id.slice(0, 8)}…` : "Mới"; }
   function formatAgents(agents) { return Array.isArray(agents) && agents.length ? ` · ${agents.join(" · ")}` : ""; }
   function displayValue(value) { return value && String(value).trim() ? String(value) : "Agent không trả về dữ liệu cho mục này."; }
+  function setAuthModal(open) { authModal.hidden = !open; if (open) (loginForm.hidden ? signupForm : loginForm).querySelector("input")?.focus(); }
+  function setAuthMode(mode) { const login = mode === "login"; loginForm.hidden = !login; signupForm.hidden = login; loginModeBtn.classList.toggle("active", login); signupModeBtn.classList.toggle("active", !login); authError.textContent = ""; }
+  function setDrawer(open) { inspector.classList.toggle("drawer-open", open); drawerBackdrop.hidden = !open; }
+  function updateAuthUi() { authBtn.textContent = currentUser ? `Đăng xuất · ${currentUser.display_name || currentUser.email}` : "Đăng nhập"; }
+  function updateTripActions() { tripActions.hidden = !threadId; }
+  async function loadAuth() {
+    try {
+      const response = await fetch("/api/auth/me");
+      const data = await response.json();
+      currentUser = data.authenticated ? data.user : null;
+      updateAuthUi();
+      if (data.auth_required && !currentUser) setAuthModal(true);
+      return data;
+    } catch (error) { console.debug("Auth status unavailable", error); return null; }
+  }
+  async function authSubmit(form, endpoint) {
+    authError.textContent = "";
+    const payload = Object.fromEntries(new FormData(form).entries());
+    try {
+      const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.error || "Không thể xác thực.");
+      currentUser = data.user; updateAuthUi(); setAuthModal(false); await loadThreads();
+    } catch (error) { authError.textContent = error.message; }
+  }
   function markdown(text) {
     if (window.marked && window.DOMPurify) return window.DOMPurify.sanitize(window.marked.parse(text || ""));
     const safe = (text || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -146,6 +183,7 @@
     threadId = data.thread_id || threadId;
     lastMessage = data.user_query || lastMessage;
     persistThread();
+    updateTripActions();
     threadLabel.textContent = shortThread(threadId);
     const node = aiTpl.content.cloneNode(true);
     const bubble = node.querySelector(".bubble-ai");
@@ -153,7 +191,7 @@
     statusText.textContent = data.status === "awaiting_approval" ? "Bản nháp chờ phê duyệt" : data.status === "completed" ? "Lịch trình cuối đã sẵn sàng" : "Kết quả từ supervisor";
     bubble.querySelector(".answer-time").textContent = new Intl.DateTimeFormat("vi-VN", { hour: "2-digit", minute: "2-digit" }).format(new Date());
     bubble.querySelector(".answer-content").innerHTML = markdown(data.answer);
-    const values = { flight: data.flight_results, hotel: data.hotel_results, weather: data.weather_result, budget: data.budget_results, itinerary: data.itinerary };
+    const values = { flight: data.flight_results, hotel: data.hotel_results, weather: data.weather_result, budget: data.budget_results, itinerary: data.itinerary, sources: (data.evidence_records || []).map((item) => `[${item.status}] ${item.source} · ${item.kind}\n${item.retrieved_at}\n${item.source_url || "Không có URL nguồn"}\n${item.content}`).join("\n\n") };
     Object.entries(values).forEach(([key, value]) => { bubble.querySelector(`[data-panel="${key}"]`).textContent = displayValue(value); });
     const groundingStatus = bubble.querySelector(".grounding-status");
     if (data.grounding_status === "verified") {
@@ -178,6 +216,7 @@
         const feedback = window.prompt("Bạn muốn chỉnh sửa điều gì?", "");
         if (feedback !== null && feedback.trim()) resumeApproval(false, feedback.trim(), box);
       });
+      box.querySelectorAll(".quick-feedback").forEach((button) => button.addEventListener("click", () => resumeApproval(false, button.dataset.feedback || "", box)));
     }
     chatLog.appendChild(node);
     bottom();
@@ -229,6 +268,7 @@
       if (!response.ok || !data.success) throw new Error(data.error || "Thread not found");
       clearConversation();
       threadId = data.thread_id;
+      updateTripActions();
       lastMessage = data.user_query || "";
       persistThread();
       threadLabel.textContent = shortThread(threadId);
@@ -239,6 +279,33 @@
       addError("Không thể tải lại phiên này. Có thể database chưa sẵn sàng.", false);
       console.error(error);
     }
+  }
+  async function updateTrip(payload) {
+    if (!threadId) return;
+    const response = await fetch(`/api/threads/${encodeURIComponent(threadId)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.error || "Không thể cập nhật chuyến đi.");
+    await loadThreads();
+  }
+  async function exportTrip(format) {
+    if (!threadId) return;
+    const response = await fetch(`/api/threads/${encodeURIComponent(threadId)}/export?format=${format}`);
+    if (!response.ok) throw new Error("Không thể xuất lịch trình.");
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a"); link.href = url; link.download = `tripmate-${threadId}.${format === "ics" ? "ics" : "md"}`; link.click(); URL.revokeObjectURL(url);
+  }
+  async function renameActiveTrip() {
+    if (!threadId) return;
+    const title = window.prompt("Tên chuyến đi", "Chuyến đi của tôi");
+    if (title === null || !title.trim()) return;
+    try { await updateTrip({ title: title.trim() }); } catch (error) { addError(error.message, false); }
+  }
+  async function shareActiveTrip() {
+    if (!threadId) return;
+    const shareText = `${window.location.origin}/?thread=${encodeURIComponent(threadId)}`;
+    try { await navigator.clipboard.writeText(shareText); setSystemStatus("complete"); systemStatusHint.textContent = "Đã sao chép liên kết phiên hiện tại"; }
+    catch (error) { window.prompt("Sao chép liên kết này", shareText); }
   }
   async function send(text) {
     if (sending || !text.trim()) return;
@@ -259,6 +326,7 @@
       const data = await response.json();
       if (loading) loading.remove();
       if (!response.ok || !data.success) {
+        if (response.status === 401 || data.code === "unauthenticated") { setAuthModal(true); return; }
         addError(data.error || "Đã có lỗi xảy ra khi lập kế hoạch.", true);
         return;
       }
@@ -307,10 +375,27 @@
     messageInput.focus();
   });
   refreshHistoryBtn.addEventListener("click", loadThreads);
+  authBtn.addEventListener("click", async () => {
+    if (!currentUser) { setAuthMode("login"); setAuthModal(true); return; }
+    await fetch("/api/auth/logout", { method: "POST" }); currentUser = null; updateAuthUi(); clearConversation(); loadThreads();
+  });
+  authClose.addEventListener("click", () => setAuthModal(false));
+  loginModeBtn.addEventListener("click", () => setAuthMode("login"));
+  signupModeBtn.addEventListener("click", () => setAuthMode("signup"));
+  loginForm.addEventListener("submit", (event) => { event.preventDefault(); authSubmit(loginForm, "/api/auth/login"); });
+  signupForm.addEventListener("submit", (event) => { event.preventDefault(); authSubmit(signupForm, "/api/auth/signup"); });
+  document.getElementById("inspectorToggle").addEventListener("click", () => setDrawer(true));
+  document.getElementById("inspectorClose").addEventListener("click", () => setDrawer(false));
+  drawerBackdrop.addEventListener("click", () => setDrawer(false));
+  document.getElementById("renameTripBtn").addEventListener("click", renameActiveTrip);
+  document.getElementById("exportMdBtn").addEventListener("click", () => exportTrip("markdown").catch((error) => addError(error.message, false)));
+  document.getElementById("exportIcsBtn").addEventListener("click", () => exportTrip("ics").catch((error) => addError(error.message, false)));
+  document.getElementById("printTripBtn").addEventListener("click", () => window.print());
+  document.getElementById("shareTripBtn").addEventListener("click", shareActiveTrip);
 
   resetPipeline();
   setSystemStatus("ready");
-  loadThreads().then(() => {
+  loadAuth().then(() => loadThreads()).then(() => {
     const savedThread = window.localStorage.getItem(THREAD_STORAGE_KEY);
     if (savedThread) loadThread(savedThread);
   });

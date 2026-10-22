@@ -23,6 +23,14 @@ services:
         sync: false
       - key: HISTORY_ADMIN_TOKEN
         sync: false
+      - key: AUTH_REQUIRED
+        value: "true"
+      - key: APP_SECRET_KEY
+        sync: false
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: RATE_LIMIT_PER_MINUTE
+        value: "30"
       - key: DEFAULT_ORIGIN_IATA
         value: SGN
       - key: LANGSMITH_TRACING

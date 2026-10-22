@@ -5,7 +5,7 @@ import os
 import re
 import threading
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Annotated, Any, TypedDict
 from zoneinfo import ZoneInfo
 
@@ -20,7 +20,9 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from pydantic import BaseModel, Field
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
+from auth import ensure_auth_schema
 from mcp_client import extract_destination, forecast_mcp_search, tavily_mcp_search, weather_mcp_search
 
 load_dotenv()
@@ -92,6 +94,7 @@ class TravelState(TypedDict):
     final_response: str
     grounding_status: str
     grounding_issues: list[str]
+    evidence_records: Annotated[list[dict[str, Any]], operator.add]
     llm_calls: int
 
 
@@ -158,6 +161,24 @@ def _json_clip(value: Any, max_chars: int = 1800) -> str:
         return _clip(json.dumps(value, ensure_ascii=False, default=str), max_chars)
     except (TypeError, ValueError):
         return _clip(value, max_chars)
+
+
+def _evidence_record(source: str, kind: str, status: str, content: Any, **metadata: Any) -> dict[str, Any]:
+    return {
+        "id": f"ev_{uuid.uuid4().hex[:12]}",
+        "source": source,
+        "kind": kind,
+        "status": status,
+        "retrieved_at": datetime.now(timezone.utc).isoformat(),
+        "content": _clip(content, 1800),
+        **metadata,
+    }
+
+
+def _provider_status(content: Any) -> str:
+    text = str(content or "").lower()
+    unavailable_markers = ("unavailable", "no live", "not configured", "api error", "error:")
+    return "unavailable" if any(marker in text for marker in unavailable_markers) else "verified"
 
 
 MONTHS = {
@@ -321,6 +342,7 @@ def _context_packet(state: TravelState, include_draft: bool = False) -> str:
             "weather": _clip(state.get("weather_result", ""), 1100),
             "budget": _clip(state.get("budget_results", ""), 1100),
         },
+        "evidence_records": state.get("evidence_records", []),
     }
     if include_draft:
         packet["draft_itinerary"] = _clip(state.get("itinerary", ""), 2600)
@@ -486,8 +508,10 @@ def search_flights(query: str, limit: int = 10) -> str:
 
 
 def flight_agent(state: TravelState):
+    result = search_flights(state["user_query"])
     return {
-        "flight_results": search_flights(state["user_query"]),
+        "flight_results": result,
+        "evidence_records": [_evidence_record("AviationStack", "flight", _provider_status(result), result, source_url="https://aviationstack.com/")],
         "messages": [AIMessage(content="Flight results fetched.")],
     }
 
@@ -500,7 +524,11 @@ def hotel_agent(state: TravelState):
             hotel_results = f"Hotel information unavailable: {hotel_results}"
     except Exception as exc:
         hotel_results = f"Hotel information unavailable: {exc}"
-    return {"hotel_results": hotel_results, "messages": [AIMessage(content="Hotel information fetched.")]}
+    return {
+        "hotel_results": hotel_results,
+        "evidence_records": [_evidence_record("Tavily MCP", "hotel", _provider_status(hotel_results), hotel_results, source_url="https://tavily.com/")],
+        "messages": [AIMessage(content="Hotel information fetched.")],
+    }
 
 
 def weather_agent(state: TravelState):
@@ -511,7 +539,11 @@ def weather_agent(state: TravelState):
         weather = f"City: {city}\nCurrent weather:\n{current}\nForecast:\n{forecast}"
     except Exception as exc:
         weather = f"Weather information unavailable: {exc}"
-    return {"weather_result": weather, "messages": [AIMessage(content="Weather information fetched.")]}
+    return {
+        "weather_result": weather,
+        "evidence_records": [_evidence_record("OpenWeather MCP", "weather", _provider_status(weather), weather, source_url="https://openweathermap.org/", destination=city if "city" in locals() else "")],
+        "messages": [AIMessage(content="Weather information fetched.")],
+    }
 
 
 def budget_agent(state: TravelState):
@@ -528,6 +560,7 @@ Context packet:
     ])
     return {
         "budget_results": str(response.content),
+        "evidence_records": [_evidence_record("Budget analyst", "budget", "estimate", str(response.content))],
         "messages": [AIMessage(content="Budget analysis generated.")],
         "llm_calls": state.get("llm_calls", 0) + 1,
     }
@@ -714,8 +747,82 @@ def get_travel_graph():
             _connection = psycopg.connect(get_database_url(), autocommit=True, row_factory=dict_row)
             checkpointer = PostgresSaver(_connection)
             checkpointer.setup()
+            ensure_auth_schema(_connection)
             _graph = graph.compile(checkpointer=checkpointer)
     return _graph
+
+
+def app_connection():
+    """Return the shared Postgres connection after app-owned schema is ready."""
+    get_travel_graph()
+    return _connection
+
+
+def ensure_trip_owner(thread_id: str, user_id: str, title: str = "Chuyến đi mới") -> None:
+    connection = app_connection()
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT user_id FROM trip_metadata WHERE thread_id = %s", (thread_id,))
+        row = cursor.fetchone()
+        if row and row["user_id"] != user_id:
+            raise PermissionError("Bạn không có quyền truy cập chuyến đi này.")
+        if not row:
+            cursor.execute(
+                "INSERT INTO trip_metadata (thread_id, user_id, title) VALUES (%s, %s, %s)",
+                (thread_id, user_id, title[:120] or "Chuyến đi mới"),
+            )
+        else:
+            cursor.execute("UPDATE trip_metadata SET updated_at = NOW() WHERE thread_id = %s", (thread_id,))
+
+
+def assert_trip_owner(thread_id: str, user_id: str) -> None:
+    connection = app_connection()
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT user_id FROM trip_metadata WHERE thread_id = %s", (thread_id,))
+        row = cursor.fetchone()
+    if not row or row["user_id"] != user_id:
+        raise PermissionError("Bạn không có quyền truy cập chuyến đi này.")
+
+
+def audit_event(event_type: str, user_id: str | None = None, thread_id: str | None = None, request_id: str | None = None, metadata: dict[str, Any] | None = None) -> None:
+    try:
+        connection = app_connection()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO audit_events (user_id, thread_id, event_type, request_id, metadata) VALUES (%s, %s, %s, %s, %s)",
+                (user_id, thread_id, event_type, request_id, Jsonb(metadata or {})),
+            )
+    except Exception:
+        # Audit must never take down the travel workflow; the exception is logged by the API layer.
+        return
+
+
+def rename_trip(thread_id: str, user_id: str, title: str) -> dict[str, Any]:
+    title = re.sub(r"\s+", " ", str(title or "").strip())[:120]
+    if not title:
+        raise ValueError("Tên chuyến đi không được để trống.")
+    connection = app_connection()
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE trip_metadata SET title = %s, updated_at = NOW() WHERE thread_id = %s AND user_id = %s RETURNING thread_id, title, archived",
+            (title, thread_id, user_id),
+        )
+        row = cursor.fetchone()
+    if not row:
+        raise KeyError("Trip not found")
+    return dict(row)
+
+
+def archive_trip(thread_id: str, user_id: str, archived: bool = True) -> dict[str, Any]:
+    connection = app_connection()
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE trip_metadata SET archived = %s, updated_at = NOW() WHERE thread_id = %s AND user_id = %s RETURNING thread_id, title, archived",
+            (archived, thread_id, user_id),
+        )
+        row = cursor.fetchone()
+    if not row:
+        raise KeyError("Trip not found")
+    return dict(row)
 
 
 def _initial_state(user_input: str) -> dict[str, Any]:
@@ -738,6 +845,7 @@ def _initial_state(user_input: str) -> dict[str, Any]:
         "final_response": "",
         "grounding_status": "pending",
         "grounding_issues": [],
+        "evidence_records": [],
         "llm_calls": 0,
     }
 
@@ -789,12 +897,14 @@ def _result_from_values(
         "itinerary": values.get("itinerary", ""),
         "grounding_status": values.get("grounding_status", "pending"),
         "grounding_issues": values.get("grounding_issues", []),
+        "evidence_records": values.get("evidence_records", []),
         "llm_calls": values.get("llm_calls", 0),
     }
 
 
-def get_travel_thread(thread_id: str) -> dict[str, Any] | None:
+def get_travel_thread(thread_id: str, user_id: str = "guest") -> dict[str, Any] | None:
     """Read the latest persisted graph state for one thread."""
+    assert_trip_owner(thread_id, user_id)
     snapshot = get_travel_graph().get_state({"configurable": {"thread_id": thread_id}})
     values = dict(getattr(snapshot, "values", {}) or {})
     if not values or not values.get("user_query"):
@@ -810,7 +920,7 @@ def _checkpoint_values(checkpoint: Any) -> dict[str, Any]:
     return values if isinstance(values, dict) else {}
 
 
-def _thread_summary(thread_id: str, checkpoint_id: str, values: dict[str, Any]) -> dict[str, Any]:
+def _thread_summary(thread_id: str, checkpoint_id: str, values: dict[str, Any], title: str = "") -> dict[str, Any]:
     constraints = values.get("trip_constraints") or {}
     destination = constraints.get("destination") if isinstance(constraints, dict) else ""
     query = str(values.get("user_query") or "").strip()
@@ -818,7 +928,7 @@ def _thread_summary(thread_id: str, checkpoint_id: str, values: dict[str, Any]) 
     return {
         "thread_id": thread_id,
         "checkpoint_id": checkpoint_id,
-        "title": destination or (query[:54] + ("…" if len(query) > 54 else "")) or "Trip planning session",
+        "title": title or destination or (query[:54] + ("…" if len(query) > 54 else "")) or "Trip planning session",
         "preview": _clip(preview, 150),
         "status": _status_for_values(values),
         "user_query": _clip(query, 240),
@@ -826,31 +936,34 @@ def _thread_summary(thread_id: str, checkpoint_id: str, values: dict[str, Any]) 
     }
 
 
-def list_travel_threads(limit: int = 50) -> list[dict[str, Any]]:
+def list_travel_threads(limit: int = 50, user_id: str = "guest") -> list[dict[str, Any]]:
     """List the latest checkpoint for each thread without exposing raw state."""
     get_travel_graph()
     safe_limit = max(1, min(int(limit), 100))
     with _connection.cursor() as cursor:
         cursor.execute(
             """
-            SELECT thread_id, checkpoint_id, checkpoint
+            SELECT latest.thread_id, latest.checkpoint_id, latest.checkpoint, tm.title
             FROM (
                 SELECT DISTINCT ON (thread_id) thread_id, checkpoint_id, checkpoint
                 FROM checkpoints
                 WHERE checkpoint_ns = %s
                 ORDER BY thread_id, checkpoint_id DESC
             ) latest
+            JOIN trip_metadata tm ON tm.thread_id = latest.thread_id
+            WHERE tm.user_id = %s AND tm.archived = FALSE
             ORDER BY checkpoint_id DESC
             LIMIT %s
             """,
-            ("", safe_limit),
+            ("", user_id, safe_limit),
         )
         rows = cursor.fetchall()
-    return [_thread_summary(row["thread_id"], row["checkpoint_id"], _checkpoint_values(row["checkpoint"])) for row in rows]
+    return [_thread_summary(row["thread_id"], row["checkpoint_id"], _checkpoint_values(row["checkpoint"]), row.get("title", "")) for row in rows]
 
 
-def get_travel_thread_history(thread_id: str, limit: int = 50) -> list[dict[str, Any]]:
+def get_travel_thread_history(thread_id: str, limit: int = 50, user_id: str = "guest") -> list[dict[str, Any]]:
     """Return a compact, read-only audit trail of a thread's checkpoints."""
+    assert_trip_owner(thread_id, user_id)
     get_travel_graph()
     safe_limit = max(1, min(int(limit), 100))
     with _connection.cursor() as cursor:
@@ -882,13 +995,16 @@ def get_travel_thread_history(thread_id: str, limit: int = 50) -> list[dict[str,
     return history
 
 
-def delete_travel_thread(thread_id: str) -> bool:
+def delete_travel_thread(thread_id: str, user_id: str = "guest") -> bool:
     """Delete one thread, only when an explicit admin token is configured."""
     if not os.getenv("HISTORY_ADMIN_TOKEN"):
-        raise PermissionError("HISTORY_ADMIN_TOKEN is not configured")
+        assert_trip_owner(thread_id, user_id)
+    else:
+        assert_trip_owner(thread_id, user_id)
     get_travel_graph()
     with _connection.transaction():
         with _connection.cursor() as cursor:
+            cursor.execute("DELETE FROM trip_metadata WHERE thread_id = %s AND user_id = %s", (thread_id, user_id))
             cursor.execute("DELETE FROM checkpoint_writes WHERE thread_id = %s", (thread_id,))
             cursor.execute("DELETE FROM checkpoint_blobs WHERE thread_id = %s", (thread_id,))
             cursor.execute("DELETE FROM checkpoints WHERE thread_id = %s", (thread_id,))
@@ -911,16 +1027,21 @@ def run_travel_agent(
     thread_id: str | None = None,
     approved: bool | None = None,
     feedback: str = "",
+    user_id: str = "guest",
+    request_id: str | None = None,
 ):
     thread_id = thread_id or f"user_{uuid.uuid4().hex}"
     config = {"configurable": {"thread_id": thread_id}}
     if approved is not None:
+        assert_trip_owner(thread_id, user_id)
         result = get_travel_graph().invoke(Command(resume={"approved": approved, "feedback": feedback}), config=config)
     else:
         if not user_input or not user_input.strip():
             raise ValueError("Message cannot be empty.")
+        ensure_trip_owner(thread_id, user_id, user_input.strip()[:120])
         result = get_travel_graph().invoke(_initial_state(user_input.strip()), config=config)
 
+    audit_event("travel.completed", user_id=user_id, thread_id=thread_id, request_id=request_id, metadata={"approved": approved})
     interrupts = result.get("__interrupt__", [])
     status = "awaiting_approval" if interrupts else "completed"
     interrupt_value = interrupts[0].value if interrupts else None

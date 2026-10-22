@@ -6,6 +6,8 @@ TripMate là một ứng dụng lập kế hoạch du lịch đa agent. Người
 
 > TripMate có thể tạo kế hoạch và đề xuất. Nó không tự đặt vé, không tự thanh toán và không thay thế việc xác minh thông tin với nhà cung cấp dịch vụ.
 
+Phiên bản hiện tại còn có tài khoản/session cookie HttpOnly, ownership cho từng chuyến đi, đổi tên/archive, export Markdown/iCalendar, evidence có source/timestamp, rate limit cơ bản, request ID, security headers và audit events.
+
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-API-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-workflow-1C3C3C)](https://langchain-ai.github.io/langgraph/)
@@ -155,6 +157,7 @@ flight_results        evidence từ flight agent
 hotel_results         evidence từ hotel agent
 weather_result        current weather + forecast
 budget_results        phân tích chi phí, luôn gắn nhãn estimate
+evidence_records      source, kind, status, timestamp và nội dung evidence
 itinerary             bản nháp trước approval
 approval_request      câu hỏi hiển thị cho human reviewer
 approved              quyết định của reviewer
@@ -256,7 +259,7 @@ Approval không phải một popup giả ở frontend. Nó là trạng thái th�
 
 ## Database schema
 
-TripMate không tự tạo bảng nghiệp vụ như `flights`, `hotels` hay `bookings`. PostgreSQL hiện được dùng làm **LangGraph checkpoint store** thông qua `PostgresSaver`.
+TripMate tách bảng checkpoint của LangGraph khỏi bảng nghiệp vụ của ứng dụng. PostgreSQL được dùng cho cả **workflow persistence** và ownership/audit tối thiểu; TripMate vẫn không tự tạo bảng booking và không tự đặt vé.
 
 Khi graph được dùng lần đầu, `checkpointer.setup()` chạy migrations và tạo các bảng checkpoint. Schema thực tế do package `langgraph-checkpoint-postgres` quản lý:
 
@@ -291,6 +294,19 @@ erDiagram
 
 Không xóa các bảng `checkpoint_*` trong production nếu chưa hiểu tác động: xóa chúng sẽ làm mất khả năng resume các thread cũ. Nếu cần cleanup, hãy tạo policy theo tuổi dữ liệu và backup trước.
 
+### Bảng nghiệp vụ do TripMate sở hữu
+
+Migration tham chiếu nằm ở `migrations/001_enterprise.sql`; code cũng chạy `CREATE TABLE IF NOT EXISTS` khi database ready để deploy lần đầu an toàn.
+
+| Bảng | Mục đích |
+| --- | --- |
+| `app_users` | Email, display name, password hash và trạng thái tài khoản |
+| `app_sessions` | Chỉ lưu hash của session token, không lưu token thô |
+| `trip_metadata` | Ownership, title, archive state và timestamp của trip |
+| `audit_events` | Audit event theo user/thread/request id |
+
+Trong production nên chạy migration bằng job riêng, bật backup/restore drill, retention policy và thay local password auth bằng OIDC provider khi hệ thống có nhiều tổ chức.
+
 ## History và quản lý context
 
 ### Có lưu history không?
@@ -311,9 +327,21 @@ API history:
 | `GET /api/threads?limit=30` | Liệt kê phiên, chỉ trả summary an toàn |
 | `GET /api/threads/{thread_id}` | Đọc state mới nhất của một phiên |
 | `GET /api/threads/{thread_id}/history?limit=50` | Xem audit trail các checkpoint |
-| `DELETE /api/threads/{thread_id}` | Xóa một phiên khi gửi `X-Admin-Token` đúng |
+| `PATCH /api/threads/{thread_id}` | Đổi tên hoặc archive trip của chính user |
+| `DELETE /api/threads/{thread_id}` | Xóa trip mà user sở hữu |
+| `GET /api/threads/{thread_id}/export?format=markdown` | Tải bản Markdown |
+| `GET /api/threads/{thread_id}/export?format=ics` | Tải iCalendar |
 
-> Chỉ bật `HISTORY_ADMIN_TOKEN` nếu bạn thật sự cần cleanup bằng API. Endpoint xóa không có giao diện public để tránh xóa nhầm. Trong sản phẩm nhiều người dùng, cần thêm authentication/authorization theo user trước khi public history.
+Auth endpoints:
+
+| Endpoint | Mục đích |
+| --- | --- |
+| `POST /api/auth/signup` | Tạo tài khoản |
+| `POST /api/auth/login` | Tạo HttpOnly session cookie |
+| `POST /api/auth/logout` | Thu hồi session |
+| `GET /api/auth/me` | Kiểm tra session và auth mode |
+
+Khi `AUTH_REQUIRED=true`, mọi trip/history phải có session hợp lệ. Khi local development dùng `AUTH_REQUIRED=false`, hệ thống chạy bằng user `guest` để không cản trở việc test workflow.
 
 ### Context engineering đang hoạt động như thế nào?
 
@@ -349,12 +377,17 @@ Nếu muốn thêm agent, hãy xác định rõ agent đó đọc field nào, gh
 ```text
 .
 ├── app.py                         # FastAPI entrypoint
+├── auth.py                        # Account/session/password layer
 ├── backend.py                     # LangGraph workflow + agents
 ├── mcp_client.py                  # MCP clients và provider adapters
 ├── custom_weather_mcp_server.py   # Weather MCP server local
 ├── requirements.txt               # Python dependencies
 ├── Dockerfile                     # Production container
 ├── render.yaml                    # Render Blueprint
+├── migrations/001_enterprise.sql   # App-owned database schema
+├── requirements-dev.txt            # Test dependencies
+├── tests/                          # Unit/API regression tests
+├── .github/workflows/ci.yml        # CI checks
 ├── .env.example                   # Environment template, không chứa secret
 ├── templates/
 │   └── index.html                 # Web UI markup
@@ -397,7 +430,11 @@ Copy-Item .env.example .env
 | `GROQ_API_KEY` | Có | Guardrail, supervisor, budget, itinerary, final answer |
 | `GROQ_MODEL` | Không | Model Groq, mặc định `openai/gpt-oss-120b` |
 | `DATABASE_URL` | Có | LangGraph PostgreSQL checkpointer |
-| `HISTORY_ADMIN_TOKEN` | Không | Cho phép xóa thread qua API khi cần cleanup |
+| `AUTH_REQUIRED` | Production: Có | Bắt buộc session đăng nhập |
+| `APP_SECRET_KEY` | Production: Có | Secret ký/đảm bảo session layer; không commit |
+| `COOKIE_SECURE` | Production: `true` | Chỉ gửi cookie qua HTTPS |
+| `RATE_LIMIT_PER_MINUTE` | Không | Giới hạn request theo user/IP, mặc định `30` |
+| `HISTORY_ADMIN_TOKEN` | Legacy | Giữ cho compatibility; ownership vẫn được kiểm tra |
 | `AVIATIONSTACK_API_KEY` | Khuyến nghị | Flight API |
 | `OPEN_WEATHER_API_KEY` | Khuyến nghị | Weather MCP |
 | `TAVILY_API_KEY` | Khuyến nghị | Hotel/web search MCP |
@@ -413,6 +450,13 @@ Không commit `.env`. Không đặt secret trong frontend, Dockerfile, `render.y
 
 ```powershell
 python app.py
+```
+
+Để chạy test suite:
+
+```powershell
+pip install -r requirements-dev.txt
+pytest -q
 ```
 
 Hoặc:
@@ -435,11 +479,22 @@ Endpoints chính:
 
 ## API bằng ví dụ
 
+### Create account / login
+
+```bash
+curl -c cookies.txt -X POST http://127.0.0.1:8000/api/auth/signup \
+  -H "Content-Type: application/json" \
+  -d '{"email":"you@example.com","password":"a-strong-password","display_name":"Your name"}'
+```
+
+Khi `AUTH_REQUIRED=true`, giữ `cookies.txt` cho các request tiếp theo. Frontend tự quản lý cookie HttpOnly và không đọc token bằng JavaScript.
+
 ### Start workflow
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/travel \
   -H "Content-Type: application/json" \
+  -b cookies.txt \
   -d '{"message":"Plan a 2 day trip from Hanoi to Tokyo with flights, hotels and weather"}'
 ```
 
@@ -567,6 +622,7 @@ render services
 python -m py_compile app.py backend.py custom_weather_mcp_server.py mcp_client.py
 node --check static/script.js
 git diff --check
+pytest -q
 ```
 
 ### Smoke test HTTP
@@ -590,6 +646,8 @@ Invoke-WebRequest http://127.0.0.1:8000/ -UseBasicParsing
 | Refresh trong lúc chờ approval | User vẫn giữ `thread_id` để resume |
 | Mở lại app | Sidebar HISTORY tải lại các thread từ PostgreSQL |
 | `/ready` | Trả `200` khi checkpointer/database truy cập được |
+
+CI nằm ở `.github/workflows/ci.yml`, chạy pytest và compile check trên pull request và push vào `main`.
 
 ### Observability
 

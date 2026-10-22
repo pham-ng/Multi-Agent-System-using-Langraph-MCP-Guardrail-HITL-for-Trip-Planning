@@ -29,6 +29,7 @@ from auth import (
     validate_password,
 )
 from backend import (
+    close_database_connections,
     database_ready,
     delete_user_data,
     delete_travel_thread,
@@ -61,6 +62,7 @@ async def lifespan(_app):
         yield
     finally:
         travel_job_worker.stop()
+        close_database_connections()
 
 
 app = FastAPI(

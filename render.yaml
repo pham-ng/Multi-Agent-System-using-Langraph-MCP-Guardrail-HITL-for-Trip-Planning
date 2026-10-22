@@ -33,8 +33,14 @@ services:
         value: "30"
       - key: JOB_WORKER_ENABLED
         value: "true"
+      - key: DB_POOL_MAX_SIZE
+        value: "5"
+      - key: MCP_TOOL_TIMEOUT_SECONDS
+        value: "45"
       - key: METRICS_TOKEN
         sync: false
+      - key: PASSWORD_RESET_DEBUG
+        value: "false"
       - key: DEFAULT_ORIGIN_IATA
         value: SGN
       - key: LANGSMITH_TRACING

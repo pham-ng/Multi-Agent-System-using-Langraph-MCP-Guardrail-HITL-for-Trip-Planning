@@ -466,6 +466,8 @@ Copy-Item .env.example .env
 | `COOKIE_SECURE` | Production: `true` | Chỉ gửi cookie qua HTTPS |
 | `RATE_LIMIT_PER_MINUTE` | Không | Giới hạn request theo user/IP, mặc định `30` |
 | `JOB_WORKER_ENABLED` | Không | Bật worker PostgreSQL queue, mặc định `true` |
+| `DB_POOL_MAX_SIZE` | Không | Số connection tối đa cho app pool, mặc định `5` |
+| `MCP_TOOL_TIMEOUT_SECONDS` | Không | Timeout cho mỗi MCP/tool call, mặc định `45` giây |
 | `METRICS_TOKEN` | Production: khuyến nghị | Bảo vệ `GET /internal/metrics` |
 | `PASSWORD_RESET_DEBUG` | Local only | Trả token reset trong response để test; luôn `false` trên production |
 | `HISTORY_ADMIN_TOKEN` | Legacy | Giữ cho compatibility; ownership vẫn được kiểm tra |

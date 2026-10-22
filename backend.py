@@ -7,11 +7,13 @@ import secrets
 import threading
 import uuid
 from datetime import date, datetime, timedelta, timezone
+from contextlib import contextmanager
 from typing import Annotated, Any, TypedDict
 from zoneinfo import ZoneInfo
 
 import certifi
 import psycopg
+from psycopg_pool import ConnectionPool
 import requests
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
@@ -844,7 +846,42 @@ graph.add_edge("final_agent", END)
 
 _graph = None
 _connection = None
+_app_pool = None
 _graph_lock = threading.Lock()
+_graph_invoke_lock = threading.RLock()
+
+
+class PooledConnectionFacade:
+    """Compatibility facade for existing cursor-based app code backed by a pool."""
+
+    def __init__(self, pool: ConnectionPool):
+        self.pool = pool
+        self._local = threading.local()
+
+    @contextmanager
+    def cursor(self):
+        current = getattr(self._local, "connection", None)
+        if current is not None:
+            with current.cursor() as cursor:
+                yield cursor
+            return
+        with self.pool.connection() as connection:
+            with connection.cursor() as cursor:
+                yield cursor
+
+    @contextmanager
+    def transaction(self):
+        with self.pool.connection() as connection:
+            self._local.connection = connection
+            try:
+                with connection.transaction():
+                    yield
+            finally:
+                self._local.connection = None
+
+    def commit(self):
+        # Pool connections are autocommit; explicit commits remain a no-op for API compatibility.
+        return None
 
 
 def get_database_url() -> str:
@@ -857,7 +894,7 @@ def get_database_url() -> str:
 
 
 def get_travel_graph():
-    global _graph, _connection
+    global _graph, _connection, _app_pool
     if _graph is not None:
         return _graph
     with _graph_lock:
@@ -866,14 +903,32 @@ def get_travel_graph():
             checkpointer = PostgresSaver(_connection)
             checkpointer.setup()
             ensure_auth_schema(_connection)
+            _app_pool = ConnectionPool(
+                conninfo=get_database_url(),
+                min_size=1,
+                max_size=max(2, min(int(os.getenv("DB_POOL_MAX_SIZE", "5")), 20)),
+                kwargs={"autocommit": True, "row_factory": dict_row},
+                open=True,
+            )
             _graph = graph.compile(checkpointer=checkpointer)
     return _graph
 
 
 def app_connection():
-    """Return the shared Postgres connection after app-owned schema is ready."""
+    """Return a pooled app connection facade after app-owned schema is ready."""
     get_travel_graph()
-    return _connection
+    return PooledConnectionFacade(_app_pool)
+
+
+def close_database_connections() -> None:
+    global _app_pool, _connection, _graph
+    if _app_pool is not None:
+        _app_pool.close()
+        _app_pool = None
+    if _connection is not None:
+        _connection.close()
+        _connection = None
+    _graph = None
 
 
 def ensure_trip_owner(thread_id: str, user_id: str, title: str = "Chuyến đi mới") -> None:
@@ -1138,7 +1193,8 @@ def get_shared_trip(token: str) -> dict[str, Any] | None:
         row = cursor.fetchone()
     if not row:
         return None
-    snapshot = get_travel_graph().get_state({"configurable": {"thread_id": row["thread_id"]}})
+    with _graph_invoke_lock:
+        snapshot = get_travel_graph().get_state({"configurable": {"thread_id": row["thread_id"]}})
     values = dict(getattr(snapshot, "values", {}) or {})
     if not values.get("user_query"):
         return None
@@ -1237,7 +1293,8 @@ def _result_from_values(
 def get_travel_thread(thread_id: str, user_id: str = "guest") -> dict[str, Any] | None:
     """Read the latest persisted graph state for one thread."""
     assert_trip_owner(thread_id, user_id)
-    snapshot = get_travel_graph().get_state({"configurable": {"thread_id": thread_id}})
+    with _graph_invoke_lock:
+        snapshot = get_travel_graph().get_state({"configurable": {"thread_id": thread_id}})
     values = dict(getattr(snapshot, "values", {}) or {})
     if not values or not values.get("user_query"):
         return None
@@ -1272,7 +1329,8 @@ def list_travel_threads(limit: int = 50, user_id: str = "guest") -> list[dict[st
     """List the latest checkpoint for each thread without exposing raw state."""
     get_travel_graph()
     safe_limit = max(1, min(int(limit), 100))
-    with _connection.cursor() as cursor:
+    connection = app_connection()
+    with connection.cursor() as cursor:
         cursor.execute(
             """
             SELECT latest.thread_id, latest.checkpoint_id, latest.checkpoint, tm.title
@@ -1298,7 +1356,8 @@ def get_travel_thread_history(thread_id: str, limit: int = 50, user_id: str = "g
     assert_trip_owner(thread_id, user_id)
     get_travel_graph()
     safe_limit = max(1, min(int(limit), 100))
-    with _connection.cursor() as cursor:
+    connection = app_connection()
+    with connection.cursor() as cursor:
         cursor.execute(
             """
             SELECT checkpoint_id, parent_checkpoint_id, metadata, checkpoint
@@ -1334,8 +1393,9 @@ def delete_travel_thread(thread_id: str, user_id: str = "guest") -> bool:
     else:
         assert_trip_owner(thread_id, user_id)
     get_travel_graph()
-    with _connection.transaction():
-        with _connection.cursor() as cursor:
+    connection = app_connection()
+    with connection.transaction():
+        with connection.cursor() as cursor:
             cursor.execute("DELETE FROM trip_metadata WHERE thread_id = %s AND user_id = %s", (thread_id, user_id))
             cursor.execute("DELETE FROM checkpoint_writes WHERE thread_id = %s", (thread_id,))
             cursor.execute("DELETE FROM checkpoint_blobs WHERE thread_id = %s", (thread_id,))
@@ -1346,7 +1406,8 @@ def delete_travel_thread(thread_id: str, user_id: str = "guest") -> bool:
 def database_ready() -> tuple[bool, str]:
     try:
         get_travel_graph()
-        with _connection.cursor() as cursor:
+        connection = app_connection()
+        with connection.cursor() as cursor:
             cursor.execute("SELECT 1")
             cursor.fetchone()
         return True, "database connected"
@@ -1366,12 +1427,14 @@ def run_travel_agent(
     config = {"configurable": {"thread_id": thread_id}}
     if approved is not None:
         assert_trip_owner(thread_id, user_id)
-        result = get_travel_graph().invoke(Command(resume={"approved": approved, "feedback": feedback}), config=config)
+        with _graph_invoke_lock:
+            result = get_travel_graph().invoke(Command(resume={"approved": approved, "feedback": feedback}), config=config)
     else:
         if not user_input or not user_input.strip():
             raise ValueError("Message cannot be empty.")
         ensure_trip_owner(thread_id, user_id, user_input.strip()[:120])
-        result = get_travel_graph().invoke(_initial_state(user_input.strip()), config=config)
+        with _graph_invoke_lock:
+            result = get_travel_graph().invoke(_initial_state(user_input.strip()), config=config)
 
     audit_event("travel.completed", user_id=user_id, thread_id=thread_id, request_id=request_id, metadata={"approved": approved})
     interrupts = result.get("__interrupt__", [])

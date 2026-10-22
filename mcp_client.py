@@ -1,12 +1,14 @@
 import os
 import shutil
 import sys
+import asyncio
 from pathlib import Path
 
 import certifi
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from reliability import CircuitBreaker, async_call_with_retry
 
 os.environ["SSL_CERT_FILE"] = certifi.where()
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
@@ -23,7 +25,12 @@ AVIATION_STACK_API_KEY = os.getenv("AVIATIONSTACK_API_KEY")
 OPEN_WEATHER_API_KEY = os.getenv("OPEN_WEATHER_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-llm = ChatGroq(model="openai/gpt-oss-120b", api_key=GROQ_API_KEY)
+llm = None
+_breakers = {
+    "tavily": CircuitBreaker("tavily"),
+    "aviationstack": CircuitBreaker("aviationstack_mcp"),
+    "weather": CircuitBreaker("weather"),
+}
 
 TAVILY_SERVER = {
     "transport": "streamable_http",
@@ -54,12 +61,21 @@ weather_client = MultiServerMCPClient({"weather": WEATHER_SERVER})
 
 
 async def _invoke_tool(client, tool_name: str, args: dict):
-    tools = await client.get_tools()
-    tool = next((candidate for candidate in tools if candidate.name == tool_name), None)
-    if tool is None:
-        available = ", ".join(candidate.name for candidate in tools)
-        raise RuntimeError(f"MCP tool '{tool_name}' was not found. Available: {available}")
-    return await tool.ainvoke(args)
+    async def invoke_once():
+        tools = await client.get_tools()
+        tool = next((candidate for candidate in tools if candidate.name == tool_name), None)
+        if tool is None:
+            available = ", ".join(candidate.name for candidate in tools)
+            raise RuntimeError(f"MCP tool '{tool_name}' was not found. Available: {available}")
+        return await asyncio.wait_for(tool.ainvoke(args), timeout=float(os.getenv("MCP_TOOL_TIMEOUT_SECONDS", "45")))
+
+    if client is tavily_client:
+        breaker = _breakers["tavily"]
+    elif client is aviation_client:
+        breaker = _breakers["aviationstack"]
+    else:
+        breaker = _breakers["weather"]
+    return await async_call_with_retry(invoke_once, breaker=breaker, attempts=3)
 
 
 async def get_all_tools():
@@ -89,6 +105,11 @@ async def forecast_mcp_search(city: str):
 
 
 def extract_destination(query: str) -> str:
+    global llm
+    if llm is None:
+        if not GROQ_API_KEY:
+            raise ValueError("GROQ_API_KEY is missing")
+        llm = ChatGroq(model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"), api_key=GROQ_API_KEY)
     response = llm.invoke(
         f"Extract only the destination city or country from this travel request. Return only its name.\n{query}"
     )

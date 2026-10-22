@@ -31,6 +31,10 @@ services:
         value: "true"
       - key: RATE_LIMIT_PER_MINUTE
         value: "30"
+      - key: JOB_WORKER_ENABLED
+        value: "true"
+      - key: METRICS_TOKEN
+        sync: false
       - key: DEFAULT_ORIGIN_IATA
         value: SGN
       - key: LANGSMITH_TRACING

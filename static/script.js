@@ -159,6 +159,24 @@
       });
     }));
   }
+  async function requestTravel(payload) {
+    const headers = { "Content-Type": "application/json" };
+    if (!payload.thread_id && window.crypto?.randomUUID) headers["Idempotency-Key"] = window.crypto.randomUUID();
+    const response = await fetch("/api/travel", { method: "POST", headers, body: JSON.stringify({ ...payload, async_mode: true }) });
+    const data = await response.json();
+    if (response.status !== 202) return { response, data };
+    let job = data;
+    while (["queued", "running"].includes(job.status)) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1500));
+      const poll = await fetch(`/api/jobs/${encodeURIComponent(job.job_id)}`);
+      job = await poll.json();
+      if (!poll.ok) return { response: poll, data: job };
+    }
+    if (job.status === "failed" || job.status === "cancelled") {
+      return { response: { ok: false, status: 500 }, data: { success: false, error: job.error || "Tác vụ không thể hoàn tất." } };
+    }
+    return { response: { ok: true, status: 200 }, data: job.result || { success: false, error: "Tác vụ không trả về kết quả." } };
+  }
   async function resumeApproval(approved, feedback, approvalBox) {
     if (sending || !threadId) return;
     sending = true;
@@ -166,12 +184,7 @@
     setSystemStatus("working");
     setPipeline("working");
     try {
-      const response = await fetch("/api/travel", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ thread_id: threadId, approved, feedback }),
-      });
-      const data = await response.json();
+      const { response, data } = await requestTravel({ thread_id: threadId, approved, feedback });
       if (!response.ok || !data.success) {
         addError(data.error || "Không thể tiếp tục quy trình duyệt.", false);
         return;
@@ -332,12 +345,7 @@
     setSystemStatus("working");
     setPipeline("working");
     try {
-      const response = await fetch("/api/travel", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: lastMessage, thread_id: threadId }),
-      });
-      const data = await response.json();
+      const { response, data } = await requestTravel({ message: lastMessage, thread_id: threadId });
       if (loading) loading.remove();
       if (!response.ok || !data.success) {
         if (response.status === 401 || data.code === "unauthenticated") { setAuthModal(true); return; }

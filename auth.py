@@ -16,11 +16,13 @@ import secrets
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 
 SESSION_COOKIE = "tripmate_session"
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
+PASSWORD_RESET_TTL_SECONDS = 60 * 30
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
@@ -89,6 +91,32 @@ def _hash_token(token: str) -> str:
 def hash_token(token: str) -> str:
     """Hash bearer-style tokens before storing or comparing them in Postgres."""
     return _hash_token(token)
+
+
+def apply_migrations(connection: Any) -> None:
+    """Apply ordered, idempotent SQL migrations for app-owned tables."""
+    migrations_dir = Path(__file__).resolve().parent / "migrations"
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version TEXT PRIMARY KEY,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        cursor.execute("SELECT version FROM schema_migrations")
+        applied = {row["version"] if isinstance(row, dict) else row[0] for row in cursor.fetchall()}
+
+    for path in sorted(migrations_dir.glob("*.sql")):
+        version = path.stem
+        if version in applied:
+            continue
+        sql = path.read_text(encoding="utf-8")
+        with connection.transaction():
+            with connection.cursor() as cursor:
+                cursor.execute(sql)
+                cursor.execute("INSERT INTO schema_migrations (version) VALUES (%s) ON CONFLICT DO NOTHING", (version,))
 
 
 def ensure_auth_schema(connection: Any) -> None:
@@ -168,6 +196,7 @@ def ensure_auth_schema(connection: Any) -> None:
             ON CONFLICT (thread_id) DO NOTHING
             """
         )
+    apply_migrations(connection)
     connection.commit()
 
 
@@ -240,6 +269,45 @@ def revoke_session(connection: Any, token: str | None) -> None:
     with connection.cursor() as cursor:
         cursor.execute("DELETE FROM app_sessions WHERE token_hash = %s", (_hash_token(token),))
     connection.commit()
+
+
+def create_password_reset_token(connection: Any, email: str) -> str | None:
+    normalized = normalize_email(email)
+    token = secrets.token_urlsafe(48)
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT id FROM app_users WHERE email = %s AND is_active = TRUE", (normalized,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        cursor.execute("DELETE FROM password_reset_tokens WHERE user_id = %s OR expires_at < NOW()", (row["id"],))
+        cursor.execute(
+            "INSERT INTO password_reset_tokens (token_hash, user_id, expires_at) VALUES (%s, %s, NOW() + (%s * INTERVAL '1 second'))",
+            (_hash_token(token), row["id"], PASSWORD_RESET_TTL_SECONDS),
+        )
+    connection.commit()
+    return token
+
+
+def reset_password(connection: Any, token: str, password: str) -> bool:
+    validated = validate_password(password)
+    if not token or len(token) > 200:
+        return False
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT user_id FROM password_reset_tokens
+            WHERE token_hash = %s AND expires_at > NOW() AND used_at IS NULL
+            """,
+            (_hash_token(token),),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return False
+        cursor.execute("UPDATE app_users SET password_hash = %s, updated_at = NOW() WHERE id = %s", (hash_password(validated), row["user_id"]))
+        cursor.execute("UPDATE password_reset_tokens SET used_at = NOW() WHERE token_hash = %s", (_hash_token(token),))
+        cursor.execute("DELETE FROM app_sessions WHERE user_id = %s", (row["user_id"],))
+    connection.commit()
+    return True
 
 
 def signed_guest_id() -> str:

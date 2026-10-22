@@ -66,34 +66,42 @@ Mở [http://127.0.0.1:8000](http://127.0.0.1:8000). Tài liệu API tương tá
 ```mermaid
 flowchart TD
     A[User message] --> B[FastAPI /api/travel]
-    B --> C[Load or create thread_id]
-    C --> D[Supervisor node]
-    D --> E{Guardrail allowed?}
-    E -- No --> F[Safe blocked response]
-    E -- Yes --> G[Dynamic agent routing]
-    G --> H[Flight agent]
-    G --> I[Hotel agent]
-    G --> J[Weather agent]
-    G --> K[Budget agent]
-    H --> L[Itinerary agent]
-    I --> L
-    J --> L
-    K --> L
-    L --> M[Draft itinerary]
-    M --> N{{interrupt: human approval}}
-    N -- approved=true --> O[Final answer]
-    N -- approved=false --> P[Use feedback and revise]
-    P --> O
-    F --> Q[END]
-    O --> Q
+    B --> C{async_mode?}
+    C -- Yes --> Q[(PostgreSQL travel_jobs)]
+    Q --> W[Durable worker]
+    C -- No --> D[Load or create thread_id]
+    W --> D
+    D --> E[Load or create thread_id]
+    E --> F{Guardrail allowed?}
+    F -- No --> G[Safe blocked response]
+    F -- Yes --> H[Dynamic agent routing]
+    H --> I[Flight agent]
+    H --> J[Hotel agent]
+    H --> K[Weather agent]
+    H --> L[Budget agent]
+    I --> M[Itinerary agent]
+    J --> M
+    K --> M
+    L --> M
+    M --> N[Draft itinerary]
+    N --> O{{interrupt: human approval}}
+    O -- approved=true --> P[Final answer + grounding]
+    O -- approved=false --> R[Use feedback and revise]
+    R --> P
+    G --> S[END]
+    P --> S
 ```
 
 ### Trạng thái của một request
 
 | Trạng thái | Ý nghĩa | UI/API nên làm gì |
 | --- | --- | --- |
+| `queued` | Job đã ghi vào PostgreSQL, đang chờ worker | Poll `GET /api/jobs/{job_id}` hoặc dùng UI |
+| `running` | Worker đang gọi graph/provider | Hiển thị tiến trình, không gửi trùng request |
 | `awaiting_approval` | Có draft và workflow đang pause | Hiển thị draft, approval request và hai nút duyệt/sửa |
 | `completed` | Workflow đã chạy đến `final_agent` | Hiển thị final answer và dữ liệu agent |
+| `blocked` | Grounding/guardrail không đủ an toàn | Hiển thị lý do, không coi là thành công |
+| `failed` | Job lỗi sau số lần retry cho phép | Hiển thị retry action và request id |
 | `success: false` | Request không thực thi được | Hiển thị lỗi, không làm mất `thread_id` cũ |
 | guardrail blocked | Request ngoài phạm vi hoặc không an toàn | Hiển thị giải thích ngắn, không gọi các agent dữ liệu |
 
@@ -294,9 +302,18 @@ erDiagram
 
 Không xóa các bảng `checkpoint_*` trong production nếu chưa hiểu tác động: xóa chúng sẽ làm mất khả năng resume các thread cũ. Nếu cần cleanup, hãy tạo policy theo tuổi dữ liệu và backup trước.
 
+Backup thủ công bằng PostgreSQL client:
+
+```powershell
+$env:DATABASE_URL = "postgresql://..."
+.\scripts\backup_db.ps1
+```
+
+Backup phải được lưu ngoài repository, mã hóa khi lưu trữ và kiểm tra restore định kỳ. Không đưa `DATABASE_URL` vào log hoặc commit.
+
 ### Bảng nghiệp vụ do TripMate sở hữu
 
-Migration tham chiếu nằm ở `migrations/001_enterprise.sql`; code cũng chạy `CREATE TABLE IF NOT EXISTS` khi database ready để deploy lần đầu an toàn.
+Migration tham chiếu nằm ở `migrations/001_enterprise.sql` và `migrations/002_production_hardening.sql`. App tự chạy migration idempotent khi database ready; bảng `schema_migrations` ghi version đã áp dụng.
 
 | Bảng | Mục đích |
 | --- | --- |
@@ -304,8 +321,11 @@ Migration tham chiếu nằm ở `migrations/001_enterprise.sql`; code cũng ch�
 | `app_sessions` | Chỉ lưu hash của session token, không lưu token thô |
 | `trip_metadata` | Ownership, title, archive state, share token hash và timestamp của trip |
 | `audit_events` | Audit event theo user/thread/request id |
+| `travel_jobs` | Durable queue cho tác vụ LLM/tool chạy lâu, retry và idempotency |
+| `password_reset_tokens` | Token reset mật khẩu dạng hash, có hạn sử dụng |
+| `schema_migrations` | Theo dõi migration app-owned |
 
-Trong production nên chạy migration bằng job riêng, bật backup/restore drill, retention policy và thay local password auth bằng OIDC provider khi hệ thống có nhiều tổ chức.
+Worker dùng `FOR UPDATE SKIP LOCKED`, vì vậy nhiều instance có thể cùng đọc queue mà không chạy trùng một job. Job hoàn tất sau 30 ngày sẽ được cleanup; audit giữ 180 ngày. Với production thật vẫn cần backup/restore drill và connection pooler riêng.
 
 ## History và quản lý context
 
@@ -334,6 +354,8 @@ API history:
 | `POST /api/threads/{thread_id}/share` | Tạo bearer link read-only, hết hạn sau 72 giờ |
 | `DELETE /api/threads/{thread_id}/share` | Thu hồi link chia sẻ |
 | `GET /shared/{token}` | Đọc final answer qua link chia sẻ |
+| `GET /api/jobs/{job_id}` | Poll trạng thái job bất đồng bộ |
+| `DELETE /api/account` | Xóa tài khoản, trip, checkpoint và session của user |
 
 Auth endpoints:
 
@@ -343,6 +365,8 @@ Auth endpoints:
 | `POST /api/auth/login` | Tạo HttpOnly session cookie |
 | `POST /api/auth/logout` | Thu hồi session |
 | `GET /api/auth/me` | Kiểm tra session và auth mode |
+| `POST /api/auth/password-reset/request` | Tạo reset token đã hash; production nối thêm email provider |
+| `POST /api/auth/password-reset/confirm` | Đổi mật khẩu bằng token còn hạn |
 
 Khi `AUTH_REQUIRED=true`, mọi trip/history phải có session hợp lệ. Khi local development dùng `AUTH_REQUIRED=false`, hệ thống chạy bằng user `guest` để không cản trở việc test workflow.
 
@@ -437,6 +461,9 @@ Copy-Item .env.example .env
 | `APP_SECRET_KEY` | Production: Có | Secret ký/đảm bảo session layer; không commit |
 | `COOKIE_SECURE` | Production: `true` | Chỉ gửi cookie qua HTTPS |
 | `RATE_LIMIT_PER_MINUTE` | Không | Giới hạn request theo user/IP, mặc định `30` |
+| `JOB_WORKER_ENABLED` | Không | Bật worker PostgreSQL queue, mặc định `true` |
+| `METRICS_TOKEN` | Production: khuyến nghị | Bảo vệ `GET /internal/metrics` |
+| `PASSWORD_RESET_DEBUG` | Local only | Trả token reset trong response để test; luôn `false` trên production |
 | `HISTORY_ADMIN_TOKEN` | Legacy | Giữ cho compatibility; ownership vẫn được kiểm tra |
 | `AVIATIONSTACK_API_KEY` | Khuyến nghị | Flight API |
 | `OPEN_WEATHER_API_KEY` | Khuyến nghị | Weather MCP |
@@ -474,6 +501,9 @@ Endpoints chính:
 - `GET /health` — liveness check.
 - `GET /ready` — kiểm tra database readiness.
 - `POST /api/travel` — start/resume workflow.
+- `POST /api/travel` với `async_mode=true` — enqueue workflow, trả `202` và `job_id`.
+- `GET /api/jobs/{job_id}` — poll job và nhận `result` khi hoàn tất.
+- `GET /internal/metrics` — metrics nội bộ, cần header `X-Metrics-Token`.
 - `GET /api/threads` — danh sách phiên đã lưu.
 - `GET /api/threads/{thread_id}` — tải lại một phiên.
 - `GET /api/threads/{thread_id}/history` — audit trail checkpoint.
@@ -526,6 +556,26 @@ curl -X POST http://127.0.0.1:8000/api/travel \
   -H "Content-Type: application/json" \
   -d '{"thread_id":"YOUR_THREAD_ID","approved":true,"feedback":""}'
 ```
+
+### Async workflow production
+
+Request dài nên dùng queue durable thay vì giữ HTTP connection mở:
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/api/travel \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: unique-request-001" \
+  -b cookies.txt \
+  -d '{"message":"Plan a 2 day trip from Hanoi to Da Nang with weather", "async_mode":true}'
+```
+
+Response trả `202`:
+
+```json
+{"success":true,"status":"queued","job_id":"job_..."}
+```
+
+Poll `GET /api/jobs/job_...` cho tới khi `status` là `awaiting_approval`, `completed`, `blocked` hoặc `failed`. Frontend production đã dùng cơ chế này mặc định.
 
 ### Request revision
 
@@ -657,6 +707,10 @@ CI nằm ở `.github/workflows/ci.yml`, chạy pytest và compile check trên p
 - `llm_calls` giúp nhận biết request đang tốn bao nhiêu lượt gọi model.
 - `selected_agents` cho biết supervisor đã route nhánh nào.
 - `supervisor_reasoning` dùng để debug routing, không nên hiển thị raw cho end user nếu có thông tin nhạy cảm.
+- Middleware ghi `request_id`, latency, status code và security headers cho mọi request.
+- `GET /internal/metrics` trả request counters và p50/p95 latency khi gửi đúng `X-Metrics-Token`.
+- Provider calls có timeout, retry exponential backoff và circuit breaker; khi circuit mở, workflow ghi provider unavailable thay vì treo.
+- `travel_jobs` giữ trạng thái retry, attempt count và error message để debug job dài.
 - LangSmith có thể bật bằng `LANGSMITH_TRACING=true`.
 - Render logs cần kiểm tra cả traceback Python và lỗi port scan; port scan timeout thường chỉ là hậu quả khi app crash trước khi bind port.
 

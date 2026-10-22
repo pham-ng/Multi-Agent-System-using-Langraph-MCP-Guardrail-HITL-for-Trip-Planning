@@ -6,7 +6,7 @@ import re
 import secrets
 import threading
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Any, TypedDict
 from zoneinfo import ZoneInfo
 
@@ -25,12 +25,14 @@ from psycopg.types.json import Jsonb
 
 from auth import ensure_auth_schema, hash_token
 from mcp_client import extract_destination, forecast_mcp_search, tavily_mcp_search, weather_mcp_search
+from reliability import CircuitBreaker, call_with_retry
 
 load_dotenv()
 os.environ["SSL_CERT_FILE"] = certifi.where()
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
 
 _llm = None
+_aviation_breaker = CircuitBreaker("aviationstack")
 
 
 class GuardrailDecision(BaseModel):
@@ -569,7 +571,11 @@ def search_flights(query: str, limit: int = 10) -> str:
     if destination:
         params["arr_iata"] = destination
     try:
-        response = requests.get("https://api.aviationstack.com/v1/flights", params=params, timeout=30)
+        response = call_with_retry(
+            lambda: requests.get("https://api.aviationstack.com/v1/flights", params=params, timeout=30),
+            breaker=_aviation_breaker,
+            attempts=3,
+        )
         data = response.json()
     except (requests.RequestException, ValueError) as exc:
         return f"Flight information unavailable: {exc}"
@@ -906,6 +912,173 @@ def audit_event(event_type: str, user_id: str | None = None, thread_id: str | No
     except Exception:
         # Audit must never take down the travel workflow; the exception is logged by the API layer.
         return
+
+
+def enqueue_travel_job(
+    user_id: str,
+    payload: dict[str, Any],
+    request_id: str | None = None,
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    """Persist a travel operation so the request can be processed asynchronously."""
+    job_id = f"job_{uuid.uuid4().hex}"
+    thread_id = payload.get("thread_id")
+    connection = app_connection()
+    with connection.transaction():
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO travel_jobs (id, user_id, thread_id, payload, request_id, idempotency_key)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+                RETURNING id, status, thread_id, created_at, updated_at
+                """,
+                (job_id, user_id, thread_id, Jsonb(payload), request_id, idempotency_key),
+            )
+            row = cursor.fetchone()
+            if not row and idempotency_key:
+                cursor.execute(
+                    """
+                    SELECT id, status, thread_id, created_at, updated_at
+                    FROM travel_jobs
+                    WHERE user_id = %s AND idempotency_key = %s
+                    """,
+                    (user_id, idempotency_key),
+                )
+                row = cursor.fetchone()
+    if not row:
+        raise RuntimeError("Unable to enqueue travel job")
+    return {"job_id": row["id"], "status": row["status"], "thread_id": row["thread_id"], "created_at": row["created_at"].isoformat(), "updated_at": row["updated_at"].isoformat()}
+
+
+def recover_stale_travel_jobs(stale_minutes: int = 15) -> None:
+    connection = app_connection()
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE travel_jobs
+            SET status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END,
+                error_code = CASE WHEN attempts >= max_attempts THEN 'worker_timeout' ELSE error_code END,
+                error_message = CASE WHEN attempts >= max_attempts THEN 'Worker did not finish the job in time.' ELSE error_message END,
+                locked_at = NULL, locked_by = NULL, updated_at = NOW()
+            WHERE status = 'running' AND locked_at < NOW() - (%s * INTERVAL '1 minute')
+            """,
+            (stale_minutes,),
+        )
+
+
+def claim_next_travel_job(worker_id: str) -> dict[str, Any] | None:
+    connection = app_connection()
+    with connection.transaction():
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, user_id, thread_id, payload, request_id, attempts, max_attempts
+                FROM travel_jobs
+                WHERE status = 'queued' AND available_at <= NOW()
+                ORDER BY created_at
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+                """
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            cursor.execute(
+                """
+                UPDATE travel_jobs
+                SET status = 'running', attempts = attempts + 1,
+                    locked_at = NOW(), locked_by = %s, started_at = COALESCE(started_at, NOW()), updated_at = NOW()
+                WHERE id = %s
+                RETURNING attempts
+                """,
+                (worker_id, row["id"]),
+            )
+            row["attempts"] = cursor.fetchone()["attempts"]
+    return dict(row)
+
+
+def finish_travel_job(job_id: str, result: dict[str, Any]) -> None:
+    connection = app_connection()
+    status = result.get("status") if result.get("status") in {"awaiting_approval", "completed", "blocked"} else "completed"
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE travel_jobs
+            SET status = %s, result = %s, thread_id = COALESCE(%s, thread_id),
+                error_code = NULL, error_message = NULL, locked_at = NULL, locked_by = NULL,
+                finished_at = NOW(), updated_at = NOW()
+            WHERE id = %s
+            """,
+            (status, Jsonb(result), result.get("thread_id"), job_id),
+        )
+
+
+def fail_travel_job(job_id: str, error: Exception, retry_delay_seconds: int = 5) -> None:
+    connection = app_connection()
+    message = str(error)[:1000] or error.__class__.__name__
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE travel_jobs
+            SET status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END,
+                error_code = %s, error_message = %s,
+                available_at = NOW() + (%s * INTERVAL '1 second'),
+                locked_at = NULL, locked_by = NULL, updated_at = NOW(),
+                finished_at = CASE WHEN attempts >= max_attempts THEN NOW() ELSE NULL END
+            WHERE id = %s
+            """,
+            (error.__class__.__name__, message, max(1, retry_delay_seconds), job_id),
+        )
+
+
+def get_travel_job(job_id: str, user_id: str) -> dict[str, Any] | None:
+    connection = app_connection()
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id, user_id, thread_id, operation, status, result, error_code, error_message,
+                   attempts, max_attempts, created_at, updated_at, started_at, finished_at
+            FROM travel_jobs WHERE id = %s AND user_id = %s
+            """,
+            (job_id, user_id),
+        )
+        row = cursor.fetchone()
+    if not row:
+        return None
+    data = dict(row)
+    for key in ("created_at", "updated_at", "started_at", "finished_at"):
+        if data.get(key):
+            data[key] = data[key].isoformat()
+    return data
+
+
+def cleanup_operational_data() -> None:
+    """Bound storage growth without deleting active trips or audit evidence prematurely."""
+    connection = app_connection()
+    with connection.cursor() as cursor:
+        cursor.execute("DELETE FROM app_sessions WHERE expires_at < NOW()")
+        cursor.execute("DELETE FROM password_reset_tokens WHERE expires_at < NOW() OR used_at < NOW() - INTERVAL '1 day'")
+        cursor.execute("DELETE FROM travel_jobs WHERE status IN ('completed', 'blocked', 'failed', 'cancelled') AND updated_at < NOW() - INTERVAL '30 days'")
+        cursor.execute("DELETE FROM audit_events WHERE created_at < NOW() - INTERVAL '180 days'")
+
+
+def delete_user_data(user_id: str) -> None:
+    """Delete a user's application data and LangGraph checkpoints atomically."""
+    connection = app_connection()
+    with connection.transaction():
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT thread_id FROM trip_metadata WHERE user_id = %s", (user_id,))
+            thread_ids = [row["thread_id"] for row in cursor.fetchall()]
+            for thread_id in thread_ids:
+                cursor.execute("DELETE FROM trip_metadata WHERE thread_id = %s", (thread_id,))
+                cursor.execute("DELETE FROM checkpoint_writes WHERE thread_id = %s", (thread_id,))
+                cursor.execute("DELETE FROM checkpoint_blobs WHERE thread_id = %s", (thread_id,))
+                cursor.execute("DELETE FROM checkpoints WHERE thread_id = %s", (thread_id,))
+                cursor.execute("DELETE FROM audit_events WHERE thread_id = %s", (thread_id,))
+            cursor.execute("DELETE FROM audit_events WHERE user_id = %s", (user_id,))
+            cursor.execute("DELETE FROM app_sessions WHERE user_id = %s", (user_id,))
+            cursor.execute("DELETE FROM app_users WHERE id = %s", (user_id,))
 
 
 def rename_trip(thread_id: str, user_id: str, title: str) -> dict[str, Any]:

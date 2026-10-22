@@ -1,8 +1,11 @@
 import logging
+import hmac
 import os
 import threading
 import time
 import uuid
+from collections import Counter
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
@@ -18,16 +21,22 @@ from auth import (
     auth_required,
     create_session,
     create_user,
+    create_password_reset_token,
     find_user_by_credentials,
     get_user_from_session,
     revoke_session,
+    reset_password,
     validate_password,
 )
 from backend import (
     database_ready,
+    delete_user_data,
     delete_travel_thread,
+    enqueue_travel_job,
+    get_travel_job,
     app_connection,
     archive_trip,
+    audit_event,
     create_share_token,
     get_travel_thread,
     get_travel_thread_history,
@@ -37,14 +46,28 @@ from backend import (
     rename_trip,
     run_travel_agent,
 )
+from job_worker import worker as travel_job_worker
 
 logger = logging.getLogger("tripmate.api")
 
 BASE_DIR = Path(__file__).resolve().parent
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    if os.getenv("JOB_WORKER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}:
+        travel_job_worker.start()
+    try:
+        yield
+    finally:
+        travel_job_worker.stop()
+
+
 app = FastAPI(
     title="AI Travel Planning Agent System",
     description="LangGraph travel planner with guardrail and human approval",
     version="2.3.0",
+    lifespan=lifespan,
 )
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -55,12 +78,22 @@ class TravelRequest(BaseModel):
     thread_id: str | None = Field(default=None, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
     approved: bool | None = None
     feedback: str = Field(default="", max_length=4000)
+    async_mode: bool = False
 
 
 class AuthRequest(BaseModel):
     email: str = Field(min_length=3, max_length=255)
     password: str = Field(min_length=8, max_length=128)
     display_name: str = Field(default="", max_length=80)
+
+
+class PasswordResetRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=255)
+
+
+class PasswordResetConfirm(BaseModel):
+    token: str = Field(min_length=20, max_length=200)
+    password: str = Field(min_length=8, max_length=128)
 
 
 class TripUpdateRequest(BaseModel):
@@ -90,6 +123,9 @@ class SimpleRateLimiter:
 
 
 rate_limiter = SimpleRateLimiter(int(os.getenv("RATE_LIMIT_PER_MINUTE", "30")))
+request_metrics = Counter()
+request_latency_ms = []
+metrics_lock = threading.Lock()
 
 
 def _request_id(request: Request) -> str:
@@ -133,6 +169,11 @@ async def request_context(request: Request, call_next):
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self' https://cdnjs.cloudflare.com; connect-src 'self'; font-src 'self' https://cdnjs.cloudflare.com https://fonts.gstatic.com"
+    with metrics_lock:
+        request_metrics[f"http_{request.method.lower()}_{request.url.path}_{response.status_code}"] += 1
+        request_latency_ms.append((time.perf_counter() - start) * 1000)
+        if len(request_latency_ms) > 5000:
+            del request_latency_ms[:1000]
     logger.info("request method=%s path=%s status=%s latency_ms=%.1f request_id=%s", request.method, request.url.path, response.status_code, (time.perf_counter() - start) * 1000, request.state.request_id)
     return response
 
@@ -156,6 +197,22 @@ def travel_planner(request_data: TravelRequest, request: Request):
         if is_resume and not request_data.thread_id:
             return JSONResponse(status_code=400, content={"success": False, "error": "thread_id is required for approval"})
 
+        if request_data.async_mode:
+            idempotency_key = request.headers.get("Idempotency-Key", "").strip()[:128] or None
+            job = enqueue_travel_job(
+                user["id"],
+                {
+                    "user_input": message,
+                    "thread_id": request_data.thread_id,
+                    "approved": request_data.approved,
+                    "feedback": request_data.feedback,
+                },
+                request_id=_request_id(request),
+                idempotency_key=idempotency_key,
+            )
+            audit_event("travel.queued", user_id=user["id"], thread_id=job.get("thread_id"), request_id=_request_id(request), metadata={"job_id": job["job_id"]})
+            return JSONResponse(status_code=202, content={"success": True, "status": job["status"], **job})
+
         result = run_travel_agent(
             user_input=message,
             thread_id=request_data.thread_id,
@@ -175,11 +232,27 @@ def travel_planner(request_data: TravelRequest, request: Request):
         return JSONResponse(status_code=500, content={"success": False, "code": "internal_error", "error": "Không thể hoàn tất yêu cầu lúc này. Vui lòng thử lại.", "request_id": _request_id(request)})
 
 
+@app.get("/api/jobs/{job_id}")
+def travel_job(job_id: str, request: Request):
+    try:
+        user = _current_user(request)
+        job = get_travel_job(job_id, user["id"])
+        if not job:
+            return JSONResponse(status_code=404, content={"success": False, "code": "not_found", "error": "Không tìm thấy tác vụ."})
+        return {"success": True, "job": job, "job_id": job["id"], "status": job["status"], "result": job.get("result"), "error": job.get("error_message")}
+    except PermissionError as exc:
+        return JSONResponse(status_code=401, content={"success": False, "code": "unauthenticated", "error": str(exc)})
+    except Exception:
+        logger.exception("job_status_failed request_id=%s", _request_id(request))
+        return JSONResponse(status_code=503, content={"success": False, "code": "job_unavailable", "error": "Không thể đọc trạng thái tác vụ."})
+
+
 @app.post("/api/auth/signup")
 def signup(request_data: AuthRequest, request: Request):
     try:
         user = create_user(app_connection(), request_data.email, validate_password(request_data.password), request_data.display_name)
         token = create_session(app_connection(), user["id"])
+        audit_event("auth.signup", user_id=user["id"], request_id=_request_id(request))
         response = JSONResponse(content={"success": True, "user": user})
         _set_session(response, token)
         return response
@@ -197,6 +270,7 @@ def login(request_data: AuthRequest, request: Request):
         if not user:
             return JSONResponse(status_code=401, content={"success": False, "code": "invalid_credentials", "error": "Email hoặc mật khẩu không đúng.", "request_id": _request_id(request)})
         token = create_session(app_connection(), user["id"])
+        audit_event("auth.login", user_id=user["id"], request_id=_request_id(request))
         response = JSONResponse(content={"success": True, "user": user})
         _set_session(response, token)
         return response
@@ -210,12 +284,55 @@ def login(request_data: AuthRequest, request: Request):
 @app.post("/api/auth/logout")
 def logout(request: Request):
     try:
+        current = _current_user(request)
+        if current["id"] != "guest":
+            audit_event("auth.logout", user_id=current["id"], request_id=_request_id(request))
         revoke_session(app_connection(), request.cookies.get(SESSION_COOKIE))
     except Exception:
         logger.exception("logout_failed request_id=%s", _request_id(request))
     response = JSONResponse(content={"success": True})
     _clear_session(response)
     return response
+
+
+@app.post("/api/auth/password-reset/request")
+def password_reset_request(request_data: PasswordResetRequest, request: Request):
+    try:
+        token = create_password_reset_token(app_connection(), request_data.email)
+        # A mail provider can be connected later without changing this API contract.
+        payload = {"success": True, "message": "Nếu email tồn tại, hướng dẫn đặt lại mật khẩu sẽ được gửi."}
+        if token and os.getenv("PASSWORD_RESET_DEBUG", "false").lower() in {"1", "true", "yes"}:
+            payload["debug_token"] = token
+        return payload
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"success": False, "code": "invalid_auth", "error": str(exc), "request_id": _request_id(request)})
+    except Exception:
+        logger.exception("password_reset_request_failed request_id=%s", _request_id(request))
+        return JSONResponse(status_code=500, content={"success": False, "code": "internal_error", "error": "Không thể xử lý yêu cầu lúc này."})
+
+
+@app.post("/api/auth/password-reset/confirm")
+def password_reset_confirm(request_data: PasswordResetConfirm, request: Request):
+    try:
+        if not reset_password(app_connection(), request_data.token, request_data.password):
+            return JSONResponse(status_code=400, content={"success": False, "code": "invalid_token", "error": "Token đặt lại mật khẩu không hợp lệ hoặc đã hết hạn."})
+        return {"success": True, "message": "Mật khẩu đã được cập nhật. Vui lòng đăng nhập lại."}
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"success": False, "code": "invalid_auth", "error": str(exc), "request_id": _request_id(request)})
+
+
+@app.delete("/api/account")
+def delete_account(request: Request):
+    try:
+        user = _current_user(request)
+        if user["id"] == "guest":
+            return JSONResponse(status_code=401, content={"success": False, "code": "unauthenticated", "error": "Bạn cần đăng nhập để xoá tài khoản."})
+        delete_user_data(user["id"])
+        response = JSONResponse(content={"success": True, "message": "Tài khoản và dữ liệu đã được xoá."})
+        _clear_session(response)
+        return response
+    except PermissionError as exc:
+        return JSONResponse(status_code=401, content={"success": False, "code": "unauthenticated", "error": str(exc)})
 
 
 @app.get("/api/auth/me")
@@ -237,6 +354,23 @@ async def readiness_check():
     ready, detail = database_ready()
     payload = {"status": "ready" if ready else "not_ready", "database": detail}
     return JSONResponse(status_code=200 if ready else 503, content=payload)
+
+
+@app.get("/internal/metrics")
+def internal_metrics(request: Request):
+    configured = os.getenv("METRICS_TOKEN", "").strip()
+    supplied = request.headers.get("X-Metrics-Token", "")
+    if not configured or not supplied or not hmac.compare_digest(configured, supplied):
+        return JSONResponse(status_code=404, content={"detail": "Not found"})
+    with metrics_lock:
+        latencies = sorted(request_latency_ms)
+        count = len(latencies)
+        p95 = latencies[min(count - 1, int(count * 0.95))] if count else 0
+        return {
+            "success": True,
+            "requests": dict(request_metrics),
+            "latency_ms": {"count": count, "p50": latencies[int(count * 0.50)] if count else 0, "p95": p95, "max": latencies[-1] if count else 0},
+        }
 
 
 @app.get("/api/threads")

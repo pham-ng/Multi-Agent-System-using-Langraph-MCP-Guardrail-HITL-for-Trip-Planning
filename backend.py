@@ -901,18 +901,29 @@ def get_travel_graph():
         return _graph
     with _graph_lock:
         if _graph is None:
-            _connection = psycopg.connect(get_database_url(), autocommit=True, row_factory=dict_row)
-            checkpointer = PostgresSaver(_connection)
-            checkpointer.setup()
-            ensure_auth_schema(_connection)
-            _app_pool = ConnectionPool(
-                conninfo=get_database_url(),
-                min_size=1,
-                max_size=max(2, min(int(os.getenv("DB_POOL_MAX_SIZE", "5")), 20)),
-                kwargs={"autocommit": True, "row_factory": dict_row},
-                open=True,
-            )
-            _graph = graph.compile(checkpointer=checkpointer)
+            connection = psycopg.connect(get_database_url(), autocommit=True, row_factory=dict_row)
+            pool = None
+            try:
+                checkpointer = PostgresSaver(connection)
+                checkpointer.setup()
+                ensure_auth_schema(connection)
+                pool = ConnectionPool(
+                    conninfo=get_database_url(),
+                    min_size=1,
+                    max_size=max(2, min(int(os.getenv("DB_POOL_MAX_SIZE", "5")), 20)),
+                    kwargs={"autocommit": True, "row_factory": dict_row},
+                    open=True,
+                )
+                _connection = connection
+                _app_pool = pool
+                _graph = graph.compile(checkpointer=checkpointer)
+            except Exception:
+                if pool is not None:
+                    pool.close()
+                connection.close()
+                _connection = None
+                _app_pool = None
+                raise
     return _graph
 
 

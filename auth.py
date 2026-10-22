@@ -274,16 +274,17 @@ def revoke_session(connection: Any, token: str | None) -> None:
 def create_password_reset_token(connection: Any, email: str) -> str | None:
     normalized = normalize_email(email)
     token = secrets.token_urlsafe(48)
-    with connection.cursor() as cursor:
-        cursor.execute("SELECT id FROM app_users WHERE email = %s AND is_active = TRUE", (normalized,))
-        row = cursor.fetchone()
-        if not row:
-            return None
-        cursor.execute("DELETE FROM password_reset_tokens WHERE user_id = %s OR expires_at < NOW()", (row["id"],))
-        cursor.execute(
-            "INSERT INTO password_reset_tokens (token_hash, user_id, expires_at) VALUES (%s, %s, NOW() + (%s * INTERVAL '1 second'))",
-            (_hash_token(token), row["id"], PASSWORD_RESET_TTL_SECONDS),
-        )
+    with connection.transaction():
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT id FROM app_users WHERE email = %s AND is_active = TRUE", (normalized,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            cursor.execute("DELETE FROM password_reset_tokens WHERE user_id = %s OR expires_at < NOW()", (row["id"],))
+            cursor.execute(
+                "INSERT INTO password_reset_tokens (token_hash, user_id, expires_at) VALUES (%s, %s, NOW() + (%s * INTERVAL '1 second'))",
+                (_hash_token(token), row["id"], PASSWORD_RESET_TTL_SECONDS),
+            )
     connection.commit()
     return token
 
@@ -292,20 +293,22 @@ def reset_password(connection: Any, token: str, password: str) -> bool:
     validated = validate_password(password)
     if not token or len(token) > 200:
         return False
-    with connection.cursor() as cursor:
-        cursor.execute(
-            """
-            SELECT user_id FROM password_reset_tokens
-            WHERE token_hash = %s AND expires_at > NOW() AND used_at IS NULL
-            """,
-            (_hash_token(token),),
-        )
-        row = cursor.fetchone()
-        if not row:
-            return False
-        cursor.execute("UPDATE app_users SET password_hash = %s, updated_at = NOW() WHERE id = %s", (hash_password(validated), row["user_id"]))
-        cursor.execute("UPDATE password_reset_tokens SET used_at = NOW() WHERE token_hash = %s", (_hash_token(token),))
-        cursor.execute("DELETE FROM app_sessions WHERE user_id = %s", (row["user_id"],))
+    with connection.transaction():
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT user_id FROM password_reset_tokens
+                WHERE token_hash = %s AND expires_at > NOW() AND used_at IS NULL
+                FOR UPDATE
+                """,
+                (_hash_token(token),),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return False
+            cursor.execute("UPDATE app_users SET password_hash = %s, updated_at = NOW() WHERE id = %s", (hash_password(validated), row["user_id"]))
+            cursor.execute("UPDATE password_reset_tokens SET used_at = NOW() WHERE token_hash = %s", (_hash_token(token),))
+            cursor.execute("DELETE FROM app_sessions WHERE user_id = %s", (row["user_id"],))
     connection.commit()
     return True
 

@@ -16,9 +16,9 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+        run: python -m pip install -r requirements-dev.txt
       - name: Python tests
-        run: pytest -q
+        run: python -m pytest -q --tb=short
       - name: Compile checks
         run: python -m py_compile auth.py backend.py app.py mcp_client.py observability.py reliability.py job_worker.py scripts/smoke_async.py
       - name: Frontend syntax check

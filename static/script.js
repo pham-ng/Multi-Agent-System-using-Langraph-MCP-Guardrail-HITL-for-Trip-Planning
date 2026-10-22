@@ -27,6 +27,9 @@
   const tripActions = document.getElementById("tripActions");
   const inspector = document.getElementById("inspector");
   const drawerBackdrop = document.getElementById("drawerBackdrop");
+  const historySidebar = document.getElementById("historySidebar");
+  const historyBackdrop = document.getElementById("historyBackdrop");
+  const historyCount = document.getElementById("historyCount");
   const THREAD_STORAGE_KEY = "tripmate.activeThreadId";
 
   let threadId = null;
@@ -70,6 +73,7 @@
   function setAuthModal(open) { authModal.hidden = !open; if (open) (loginForm.hidden ? signupForm : loginForm).querySelector("input")?.focus(); }
   function setAuthMode(mode) { const login = mode === "login"; loginForm.hidden = !login; signupForm.hidden = login; loginModeBtn.classList.toggle("active", login); signupModeBtn.classList.toggle("active", !login); authError.textContent = ""; }
   function setDrawer(open) { inspector.classList.toggle("drawer-open", open); drawerBackdrop.hidden = !open; }
+  function setHistoryDrawer(open) { historySidebar.classList.toggle("drawer-open", open); historyBackdrop.hidden = !open; }
   function updateAuthUi() { authBtn.textContent = currentUser ? `Đăng xuất · ${currentUser.display_name || currentUser.email}` : "Đăng nhập"; }
   function updateTripActions() { tripActions.hidden = !threadId; }
   async function loadAuth() {
@@ -225,6 +229,7 @@
   }
   function renderThreads(threads) {
     threadList.replaceChildren();
+    if (historyCount) historyCount.textContent = String(threads.length);
     if (!threads.length) {
       const empty = document.createElement("div");
       empty.className = "history-empty";
@@ -378,7 +383,16 @@
     loadThreads();
     messageInput.focus();
   });
-  refreshHistoryBtn.addEventListener("click", loadThreads);
+  document.getElementById("sidebarNewChatBtn")?.addEventListener("click", () => {
+    window.localStorage.removeItem(THREAD_STORAGE_KEY);
+    clearConversation();
+    setSystemStatus("ready");
+    resetPipeline();
+    setHistoryDrawer(false);
+    loadThreads();
+    messageInput.focus();
+  });
+  refreshHistoryBtn?.addEventListener("click", loadThreads);
   authBtn.addEventListener("click", async () => {
     if (!currentUser) { setAuthMode("login"); setAuthModal(true); return; }
     await fetch("/api/auth/logout", { method: "POST" }); currentUser = null; updateAuthUi(); clearConversation(); loadThreads();
@@ -391,6 +405,9 @@
   document.getElementById("inspectorToggle").addEventListener("click", () => setDrawer(true));
   document.getElementById("inspectorClose").addEventListener("click", () => setDrawer(false));
   drawerBackdrop.addEventListener("click", () => setDrawer(false));
+  document.getElementById("historyToggle")?.addEventListener("click", () => setHistoryDrawer(true));
+  document.getElementById("historyClose")?.addEventListener("click", () => setHistoryDrawer(false));
+  historyBackdrop?.addEventListener("click", () => setHistoryDrawer(false));
   document.getElementById("renameTripBtn").addEventListener("click", renameActiveTrip);
   document.getElementById("exportMdBtn").addEventListener("click", () => exportTrip("markdown").catch((error) => addError(error.message, false)));
   document.getElementById("exportIcsBtn").addEventListener("click", () => exportTrip("ics").catch((error) => addError(error.message, false)));

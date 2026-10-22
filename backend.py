@@ -94,6 +94,7 @@ class TravelState(TypedDict):
     human_feedback: str
     final_response: str
     grounding_status: str
+    grounding_method: str
     grounding_issues: list[str]
     evidence_records: Annotated[list[dict[str, Any]], operator.add]
     llm_calls: int
@@ -372,6 +373,30 @@ def _grounding_block(issues: list[str]) -> str:
         lines.extend(f"- {issue}" for issue in dict.fromkeys(issues))
     lines.append("\nBạn có thể bổ sung ngày đi/ngân sách/điểm đến hoặc thử lại khi nguồn dữ liệu sẵn sàng.")
     return "\n".join(lines)
+
+
+def _deterministic_grounding_issues(candidate: str, state: TravelState) -> list[str]:
+    """Safety checks that do not depend on a second LLM returning valid JSON."""
+    issues: list[str] = []
+    calendar = _calendar_context(state.get("user_query", ""))
+    generated_dates = _calendar_dates_in_text(candidate)
+    if not calendar["explicit_dates_provided"] and generated_dates:
+        issues.append("The final answer introduced a calendar date although the user did not provide one.")
+    if calendar["explicit_dates_provided"]:
+        allowed_dates = set(_explicit_travel_dates(state.get("user_query", "")))
+        unexpected = [item.isoformat() for item in generated_dates if item not in allowed_dates]
+        if unexpected:
+            issues.append(f"The final answer introduced dates not supplied by the user: {', '.join(unexpected)}.")
+    lowered = candidate.lower()
+    if re.search(r"\b(booked|reserved|confirmed|đã đặt|đã xác nhận)\b", lowered):
+        issues.append("The final answer claims a booking or confirmation that this system cannot perform.")
+    if re.search(r"(?:usd|us\$|\$|€|£)\s?\d", lowered) and not re.search(
+        r"\b(estimate|estimated|approx|approximately|ước tính|dự kiến|khoảng)\b", lowered
+    ):
+        issues.append("Monetary values are present without being labeled as estimates.")
+    if not candidate.strip():
+        issues.append("The final answer is empty.")
+    return list(dict.fromkeys(issues))
 
 
 def _calendar_dates_in_text(text: str) -> list[date]:
@@ -697,6 +722,7 @@ estimates and explicitly mention unverified live data in unknowns.
         return {
             "final_response": blocked,
             "grounding_status": "blocked",
+            "grounding_method": "fail_closed",
             "grounding_issues": issues,
             "messages": [AIMessage(content=blocked)],
             "llm_calls": calls,
@@ -706,11 +732,7 @@ estimates and explicitly mention unverified live data in unknowns.
         _render_grounded_plan(plan, state),
         state["user_query"],
     )
-    deterministic_issues: list[str] = []
-    calendar = _calendar_context(state.get("user_query", ""))
-    generated_dates = _calendar_dates_in_text(candidate)
-    if not calendar["explicit_dates_provided"] and generated_dates:
-        deterministic_issues.append("The final answer introduced a calendar date although the user did not provide one.")
+    deterministic_issues = _deterministic_grounding_issues(candidate, state)
 
     verifier_prompt = f"""
 {GROUNDING_POLICY}
@@ -740,7 +762,21 @@ Candidate answer (possibly clipped for verification):
             )),
         )
     except Exception as exc:
-        report = GroundingReport(grounded=False, issues=[f"Grounding verifier failed: {exc}"])
+        fallback_issues = _deterministic_grounding_issues(candidate, state)
+        if fallback_issues:
+            report = GroundingReport(
+                grounded=False,
+                issues=[f"Grounding verifier failed: {exc}", *fallback_issues],
+            )
+        else:
+            return {
+                "final_response": candidate,
+                "grounding_status": "verified",
+                "grounding_method": "deterministic_rules_fallback",
+                "grounding_issues": [],
+                "messages": [AIMessage(content=candidate)],
+                "llm_calls": calls,
+            }
 
     issues = list(dict.fromkeys([*deterministic_issues, *report.issues]))
     if not report.grounded or issues:
@@ -748,6 +784,7 @@ Candidate answer (possibly clipped for verification):
         return {
             "final_response": blocked,
             "grounding_status": "blocked",
+            "grounding_method": "fail_closed",
             "grounding_issues": issues or ["The grounding verifier did not approve the answer."],
             "messages": [AIMessage(content=blocked)],
             "llm_calls": calls,
@@ -756,6 +793,7 @@ Candidate answer (possibly clipped for verification):
     return {
         "final_response": candidate,
         "grounding_status": "verified",
+        "grounding_method": "llm_and_deterministic",
         "grounding_issues": [],
         "messages": [AIMessage(content=candidate)],
         "llm_calls": calls,
@@ -955,6 +993,7 @@ def _initial_state(user_input: str) -> dict[str, Any]:
         "human_feedback": "",
         "final_response": "",
         "grounding_status": "pending",
+        "grounding_method": "pending",
         "grounding_issues": [],
         "evidence_records": [],
         "llm_calls": 0,
@@ -1009,6 +1048,7 @@ def _result_from_values(
         "budget_results": values.get("budget_results", ""),
         "itinerary": values.get("itinerary", ""),
         "grounding_status": values.get("grounding_status", "pending"),
+        "grounding_method": values.get("grounding_method", "pending"),
         "grounding_issues": values.get("grounding_issues", []),
         "evidence_records": values.get("evidence_records", []),
         "llm_calls": values.get("llm_calls", 0),

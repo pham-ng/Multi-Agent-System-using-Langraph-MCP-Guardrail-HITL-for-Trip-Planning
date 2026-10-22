@@ -26,6 +26,12 @@ def test_blocked_grounding_has_blocked_status():
     assert backend._status_for_values({"grounding_status": "blocked"}) == "blocked"
 
 
+def test_deterministic_grounding_rejects_unlabeled_money():
+    state = {"user_query": "Plan a 2 day trip to Da Nang"}
+    issues = backend._deterministic_grounding_issues("Flight costs USD 80.", state)
+    assert any("estimates" in issue for issue in issues)
+
+
 def test_grounding_block_is_explicit():
     message = backend._grounding_block(["missing source"])
     assert "dừng" in message

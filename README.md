@@ -428,6 +428,7 @@ Nếu muốn thêm agent, hãy xác định rõ agent đó đọc field nào, gh
 ├── migrations/001_enterprise.sql   # Initial app-owned schema
 ├── migrations/002_production_hardening.sql # Jobs, reset tokens, indexes
 ├── scripts/backup_db.ps1           # pg_dump backup helper
+├── scripts/smoke_async.py          # Authenticated async/approval smoke test
 ├── requirements-dev.txt            # Test dependencies
 ├── tests/                          # Unit/API regression tests
 ├── .github/workflows/ci.yml        # CI checks
@@ -703,6 +704,15 @@ pytest -q
 ```powershell
 Invoke-WebRequest http://127.0.0.1:8000/health -UseBasicParsing
 Invoke-WebRequest http://127.0.0.1:8000/ -UseBasicParsing
+```
+
+### Smoke test async production flow
+
+Sau khi app chạy và database/provider keys đã cấu hình, script dưới đây sẽ tạo tài khoản tạm, kiểm tra idempotency, worker queue, approval resume, history và grounding; mặc định nó tự xóa tài khoản sau khi chạy:
+
+```powershell
+$env:TRIPMATE_BASE_URL = "https://<service>.onrender.com"
+python .\scripts\smoke_async.py
 ```
 
 ### Test matrix nên chạy trước mỗi release

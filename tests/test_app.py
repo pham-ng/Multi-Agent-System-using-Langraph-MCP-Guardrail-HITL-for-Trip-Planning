@@ -24,3 +24,12 @@ def test_state_change_with_cross_site_origin_is_blocked_when_session_exists():
     response = client.post("/api/auth/logout", headers={"Origin": "https://evil.example"})
     assert response.status_code == 403
     assert response.json()["code"] == "csrf_blocked"
+
+
+def test_protected_metrics_returns_usage_shape(monkeypatch):
+    monkeypatch.setenv("METRICS_TOKEN", "test-metrics-token")
+    client = TestClient(app)
+    response = client.get("/internal/metrics", headers={"X-Metrics-Token": "test-metrics-token"})
+    assert response.status_code == 200
+    assert "llm_usage" in response.json()
+    assert "estimated_cost_usd" in response.json()["llm_usage"]

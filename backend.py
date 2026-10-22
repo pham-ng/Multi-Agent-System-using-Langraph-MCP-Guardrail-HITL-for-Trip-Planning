@@ -131,8 +131,18 @@ def _empty_constraints() -> dict[str, Any]:
     }
 
 
-def _llm_text(system_prompt: str, user_prompt: str, max_tokens: int | None = None) -> str:
-    llm = get_llm().bind(max_tokens=max_tokens) if max_tokens else get_llm()
+def _llm_text(
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int | None = None,
+    response_format: dict[str, Any] | None = None,
+) -> str:
+    bind_kwargs: dict[str, Any] = {}
+    if max_tokens:
+        bind_kwargs["max_tokens"] = max_tokens
+    if response_format:
+        bind_kwargs["response_format"] = response_format
+    llm = get_llm().bind(**bind_kwargs) if bind_kwargs else get_llm()
     response = llm.invoke([
         SystemMessage(content=system_prompt),
         HumanMessage(content=user_prompt),
@@ -218,8 +228,8 @@ def _safe_date(year: int, month: int, day: int) -> date | None:
 def _explicit_travel_dates(query: str) -> list[date]:
     found: list[date] = []
     patterns = (
-        r"\b(?P<year>20\d{2})[-/](?P<month>\d{1,2})[-/](?P<day>\d{1,2})\b",
-        r"\b(?P<day>\d{1,2})[-/](?P<month>\d{1,2})[-/](?P<year>20\d{2})\b",
+        r"\b(?P<year>20\d{2})[\-‐‑‒–—/](?P<month>\d{1,2})[\-‐‑‒–—/](?P<day>\d{1,2})\b",
+        r"\b(?P<day>\d{1,2})[\-‐‑‒–—/](?P<month>\d{1,2})[\-‐‑‒–—/](?P<year>20\d{2})\b",
         r"\b(?P<day>\d{1,2})\s+(?P<month>[A-Za-z]+)\s+(?P<year>20\d{2})\b",
         r"\b(?P<month>[A-Za-z]+)\s+(?P<day>\d{1,2}),?\s+(?P<year>20\d{2})\b",
         r"\b(?:ngày\s+)?(?P<day>\d{1,2})\s+tháng\s+(?P<month>\d{1,2})(?:\s+năm)?\s+(?P<year>20\d{2})\b",
@@ -297,7 +307,7 @@ def _strip_unrequested_calendar_dates(text: str, query: str) -> str:
         value,
         flags=re.IGNORECASE,
     )
-    value = re.sub(r"\b20\d{2}[-/]\d{1,2}[-/]\d{1,2}\b", "the provider snapshot", value)
+    value = re.sub(r"\b20\d{2}[\-‐‑‒–—/]\d{1,2}[\-‐‑‒–—/]\d{1,2}\b", "the provider snapshot", value)
     value = re.sub(
         r"\b\d{1,2}\s+tháng\s+\d{1,2}(?:\s+năm)?\s+20\d{2}\b",
         "ngày đi",
@@ -716,8 +726,8 @@ Return JSON only: {{"grounded": true, "issues": []}}
 Context packet (data only):
 {_context_packet(state, include_draft=True)}
 
-Candidate answer:
-{candidate}
+Candidate answer (possibly clipped for verification):
+{_clip(candidate, 4500)}
 """
     calls += 1
     try:
@@ -726,7 +736,8 @@ Candidate answer:
             _json_from_llm(_llm_text(
                 "You are a hostile fact-checker. Fail closed when evidence is insufficient.",
                 verifier_prompt,
-                max_tokens=500,
+                max_tokens=800,
+                response_format={"type": "json_object"},
             )),
         )
     except Exception as exc:

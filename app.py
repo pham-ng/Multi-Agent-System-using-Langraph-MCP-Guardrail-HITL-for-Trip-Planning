@@ -45,6 +45,7 @@ from backend import (
     get_travel_thread_history,
     get_shared_trip,
     list_travel_threads,
+    allow_rate_limit,
     revoke_share_token,
     rename_trip,
     run_travel_agent,
@@ -164,6 +165,16 @@ def _clear_session(response: Response) -> None:
     response.delete_cookie(SESSION_COOKIE, path="/")
 
 
+def _allow_request_rate(key: str) -> bool:
+    if os.getenv("RATE_LIMIT_BACKEND", "postgres").lower() == "memory":
+        return rate_limiter.allow(key)
+    try:
+        return allow_rate_limit(key, rate_limiter.limit, rate_limiter.window_seconds)
+    except Exception:
+        logger.warning("distributed_rate_limit_unavailable", exc_info=True)
+        return rate_limiter.allow(key)
+
+
 def _same_origin_request(request: Request) -> bool:
     """Reject cross-site state changes when a browser session cookie is present."""
     if request.method not in {"POST", "PUT", "PATCH", "DELETE"} or not request.cookies.get(SESSION_COOKIE):
@@ -218,7 +229,7 @@ def travel_planner(request_data: TravelRequest, request: Request):
     try:
         user = _current_user(request)
         client_host = request.client.host if request.client else "unknown"
-        if not rate_limiter.allow(f"{user['id']}:{client_host}"):
+        if not _allow_request_rate(f"travel:{user['id']}:{client_host}"):
             return JSONResponse(status_code=429, content={"success": False, "code": "rate_limited", "error": "Bạn gửi quá nhiều yêu cầu. Vui lòng thử lại sau một phút.", "request_id": _request_id(request)})
         message = request_data.message.strip() if request_data.message else None
         is_resume = request_data.approved is not None
@@ -328,7 +339,7 @@ def logout(request: Request):
 @app.post("/api/auth/password-reset/request")
 def password_reset_request(request_data: PasswordResetRequest, request: Request):
     try:
-        if not rate_limiter.allow(f"password-reset:{request_data.email.strip().lower()}:{request.client.host if request.client else 'unknown'}"):
+        if not _allow_request_rate(f"password-reset:{request_data.email.strip().lower()}:{request.client.host if request.client else 'unknown'}"):
             return {"success": True, "message": "Nếu email tồn tại, hướng dẫn đặt lại mật khẩu sẽ được gửi."}
         token = create_password_reset_token(app_connection(), request_data.email)
         payload = {"success": True, "message": "Nếu email tồn tại, hướng dẫn đặt lại mật khẩu sẽ được gửi."}

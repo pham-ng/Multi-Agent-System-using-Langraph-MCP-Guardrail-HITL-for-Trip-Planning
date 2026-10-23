@@ -313,7 +313,7 @@ Backup phải được lưu ngoài repository, mã hóa khi lưu trữ và kiể
 
 ### Bảng nghiệp vụ do TripMate sở hữu
 
-Migration tham chiếu nằm ở `migrations/001_enterprise.sql` và `migrations/002_production_hardening.sql`. App tự chạy migration idempotent khi database ready; bảng `schema_migrations` ghi version đã áp dụng.
+Migration tham chiếu nằm ở `migrations/001_enterprise.sql`, `migrations/002_production_hardening.sql` và `migrations/003_rate_limit_buckets.sql`. App tự chạy migration idempotent khi database ready; bảng `schema_migrations` ghi version đã áp dụng.
 
 | Bảng | Mục đích |
 | --- | --- |
@@ -427,6 +427,7 @@ Nếu muốn thêm agent, hãy xác định rõ agent đó đọc field nào, gh
 ├── render.yaml                    # Render Blueprint
 ├── migrations/001_enterprise.sql   # Initial app-owned schema
 ├── migrations/002_production_hardening.sql # Jobs, reset tokens, indexes
+├── migrations/003_rate_limit_buckets.sql   # Shared PostgreSQL rate limiting
 ├── scripts/backup_db.ps1           # pg_dump backup helper
 ├── scripts/smoke_async.py          # Authenticated async/approval smoke test
 ├── requirements-dev.txt            # Test dependencies
@@ -478,6 +479,7 @@ Copy-Item .env.example .env
 | `APP_SECRET_KEY` | Production: Có | Secret ký/đảm bảo session layer; không commit |
 | `COOKIE_SECURE` | Production: `true` | Chỉ gửi cookie qua HTTPS |
 | `RATE_LIMIT_PER_MINUTE` | Không | Giới hạn request theo user/IP, mặc định `30` |
+| `RATE_LIMIT_BACKEND` | Không | `postgres` để chia sẻ limit giữa instance; `memory` chỉ dành cho local |
 | `JOB_WORKER_ENABLED` | Không | Bật worker PostgreSQL queue, mặc định `true` |
 | `DB_POOL_MAX_SIZE` | Không | Số connection tối đa cho app pool, mặc định `5` |
 | `MCP_TOOL_TIMEOUT_SECONDS` | Không | Timeout cho mỗi MCP/tool call, mặc định `45` giây |
@@ -740,6 +742,7 @@ CI nằm ở `.github/workflows/ci.yml`, chạy pytest và compile check trên p
 - `selected_agents` cho biết supervisor đã route nhánh nào.
 - `supervisor_reasoning` dùng để debug routing, không nên hiển thị raw cho end user nếu có thông tin nhạy cảm.
 - Middleware ghi `request_id`, latency, status code và security headers cho mọi request.
+- Rate limit production dùng PostgreSQL atomic bucket để nhiều instance không cộng dồn limit riêng; bucket cũ được cleanup sau 1 ngày.
 - `GET /internal/metrics` trả request counters và p50/p95 latency khi gửi đúng `X-Metrics-Token`.
 - Provider calls có timeout, retry exponential backoff và circuit breaker; khi circuit mở, workflow ghi provider unavailable thay vì treo.
 - `travel_jobs` giữ trạng thái retry, attempt count và error message để debug job dài.

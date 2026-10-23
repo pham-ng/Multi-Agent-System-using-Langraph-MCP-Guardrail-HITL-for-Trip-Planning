@@ -982,6 +982,34 @@ def audit_event(event_type: str, user_id: str | None = None, thread_id: str | No
         return
 
 
+def allow_rate_limit(key: str, limit: int, window_seconds: int = 60) -> bool:
+    """Atomically enforce a shared fixed-window limit in PostgreSQL."""
+    safe_limit = max(1, int(limit))
+    safe_window = max(1, int(window_seconds))
+    bucket_key = hash_token(f"rate:{key}")
+    connection = app_connection()
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO rate_limit_buckets (bucket_key, window_started_at, hits, updated_at)
+            VALUES (%s, NOW(), 1, NOW())
+            ON CONFLICT (bucket_key) DO UPDATE SET
+                hits = CASE
+                    WHEN rate_limit_buckets.window_started_at <= NOW() - (%s * INTERVAL '1 second') THEN 1
+                    ELSE rate_limit_buckets.hits + 1
+                END,
+                window_started_at = CASE
+                    WHEN rate_limit_buckets.window_started_at <= NOW() - (%s * INTERVAL '1 second') THEN NOW()
+                    ELSE rate_limit_buckets.window_started_at
+                END,
+                updated_at = NOW()
+            RETURNING hits
+            """,
+            (bucket_key, safe_window, safe_window),
+        )
+        return int(cursor.fetchone()["hits"]) <= safe_limit
+
+
 def enqueue_travel_job(
     user_id: str,
     payload: dict[str, Any],
@@ -1129,6 +1157,7 @@ def cleanup_operational_data() -> None:
         cursor.execute("DELETE FROM password_reset_tokens WHERE expires_at < NOW() OR used_at < NOW() - INTERVAL '1 day'")
         cursor.execute("DELETE FROM travel_jobs WHERE status IN ('completed', 'blocked', 'failed', 'cancelled') AND updated_at < NOW() - INTERVAL '30 days'")
         cursor.execute("DELETE FROM audit_events WHERE created_at < NOW() - INTERVAL '180 days'")
+        cursor.execute("DELETE FROM rate_limit_buckets WHERE updated_at < NOW() - INTERVAL '1 day'")
 
 
 def delete_user_data(user_id: str) -> None:

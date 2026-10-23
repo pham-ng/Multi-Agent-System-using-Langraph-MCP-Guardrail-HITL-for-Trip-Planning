@@ -323,6 +323,7 @@ Migration tham chiếu nằm ở `migrations/001_enterprise.sql`, `migrations/00
 | `audit_events` | Audit event theo user/thread/request id |
 | `travel_jobs` | Durable queue cho tác vụ LLM/tool chạy lâu, retry và idempotency |
 | `password_reset_tokens` | Token reset mật khẩu dạng hash, có hạn sử dụng |
+| `rate_limit_buckets` | Fixed-window rate limit dùng chung giữa các instance |
 | `schema_migrations` | Theo dõi migration app-owned |
 
 Worker dùng `FOR UPDATE SKIP LOCKED`, vì vậy nhiều instance có thể cùng đọc queue mà không chạy trùng một job. Job hoàn tất sau 30 ngày sẽ được cleanup; audit giữ 180 ngày. Với production thật vẫn cần backup/restore drill và connection pooler riêng.
